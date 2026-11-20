@@ -210,11 +210,13 @@ fn window_menu(app: &AppHandle<Wry>) -> tauri::Result<Submenu<Wry>> {
 
     let accounts_menu = Submenu::new(app, "Accounts", true)?;
     let mut has_accounts = false;
+    let mut has_active_account = false;
     if let Some(state) = app.try_state::<MultiWindowState>() {
         let accounts = state.accounts_snapshot();
         if !accounts.is_empty() {
             has_accounts = true;
             let active = state.active_account();
+            has_active_account = active.is_some();
             for account in &accounts {
                 let id = format!("switch_account:{}", account.id);
                 let mut label = if account.label.trim().is_empty() {
@@ -237,6 +239,15 @@ fn window_menu(app: &AppHandle<Wry>) -> tauri::Result<Submenu<Wry>> {
         true,
         None::<&str>,
     )?)?;
+    if has_accounts && has_active_account {
+        accounts_menu.append(&MenuItem::with_id(
+            app,
+            "rename_current_account",
+            "Rename Current Account",
+            true,
+            None::<&str>,
+        )?)?;
+    }
     if has_accounts {
         accounts_menu.append(&MenuItem::with_id(
             app,
@@ -315,6 +326,33 @@ fn copy_text_to_pasteboard(text: &str) {
         let _ = stdin.write_all(text.as_bytes());
     }
     let _ = child.wait();
+}
+
+/// Prompt for an account name with a native macOS dialog. Returns None if the
+/// user cancels or the dialog cannot be shown.
+fn prompt_account_name(default: &str) -> Option<String> {
+    let escaped = default
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', " ")
+        .replace('\r', " ");
+    let script = format!(
+        "text returned of (display dialog \"Account name:\" default answer \"{escaped}\" with title \"Pake\" buttons {{\"Cancel\",\"Save\"}} default button \"Save\")"
+    );
+    let output = Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
 }
 
 pub fn handle_menu_click(app_handle: &AppHandle, id: &str) {
@@ -454,10 +492,13 @@ pub fn handle_menu_click(app_handle: &AppHandle, id: &str) {
                         .or_else(|| state.pake_config.windows.first().map(|w| w.url.clone()));
                     let Some(url) = current_url else { return };
                     let title = window.title().unwrap_or_default();
-                    let label = if title.trim().is_empty() || title == "Pake" {
+                    let suggested = if title.trim().is_empty() || title == "Pake" {
                         url.clone()
                     } else {
                         title
+                    };
+                    let Some(label) = prompt_account_name(&suggested) else {
+                        return;
                     };
                     let id = format!(
                         "acc_{}",
@@ -501,6 +542,37 @@ pub fn handle_menu_click(app_handle: &AppHandle, id: &str) {
                             .unwrap_or(false),
                     );
                 }
+            }
+        }
+        "rename_current_account" => {
+            if let Some(state) = app_handle.try_state::<MultiWindowState>() {
+                let active = state.active_account();
+                let Some(active_id) = active else { return };
+                let mut accounts = state.accounts.lock().unwrap_or_else(|e| e.into_inner());
+                let Some(account) = accounts.iter_mut().find(|a| a.id == active_id) else {
+                    return;
+                };
+                let Some(new_label) = prompt_account_name(&account.label) else {
+                    return;
+                };
+                account.label = new_label;
+                let snapshot = accounts.clone();
+                drop(accounts);
+                if let Ok(path) = state.accounts_path.lock() {
+                    if let Some(path) = path.as_ref() {
+                        let _ = crate::util::write_accounts(path, &snapshot);
+                    }
+                }
+                let _ = set_app_menu(
+                    app_handle,
+                    state.pake_config.multi_window,
+                    state
+                        .pake_config
+                        .windows
+                        .first()
+                        .map(|w| w.enable_find)
+                        .unwrap_or(false),
+                );
             }
         }
         "remove_current_account" => {
