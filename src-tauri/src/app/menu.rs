@@ -207,6 +207,13 @@ fn window_menu(app: &AppHandle<Wry>) -> tauri::Result<Submenu<Wry>> {
     let window_menu = Submenu::new(app, "Window", true)?;
     window_menu.append(&PredefinedMenuItem::minimize(app, None)?)?;
     window_menu.append(&PredefinedMenuItem::maximize(app, None)?)?;
+    window_menu.append(&MenuItem::with_id(
+        app,
+        "switch_account",
+        "Switch Account",
+        true,
+        None::<&str>,
+    )?)?;
     window_menu.append(&PredefinedMenuItem::separator(app)?)?;
     window_menu.append(&MenuItem::with_id(
         app,
@@ -375,6 +382,16 @@ pub fn handle_menu_click(app_handle: &AppHandle, id: &str) {
             if let Some(window) = focused_webview_window(app_handle) {
                 let is_on_top = window.is_always_on_top().unwrap_or(false);
                 let _ = window.set_always_on_top(!is_on_top);
+            }
+        }
+        "switch_account" => {
+            // Hand off to the focused webview: clear its browsing data and
+            // navigate back to the home URL, giving each switch a fresh session.
+            if let Some(window) = focused_webview_window(app_handle) {
+                let _ = window.clear_all_browsing_data();
+                if let Some(url) = home_url(app_handle) {
+                    let _ = window.navigate(url);
+                }
             }
         }
         _ => {}
