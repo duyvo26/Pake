@@ -1,0 +1,15 @@
+{
+  "id": "zalo",
+  "version": 1,
+  "name": {
+    "en": "Zalo",
+    "zh-Hans": "Zalo"
+  },
+  "url": "https://chat.zalo.me/",
+  "category": "social",
+  "description": {
+    "en": "Zalo messaging on the web",
+    "zh-Hans": "Zalo messaging on the web"
+  },
+  "icon": "https://chat.zalo.me/apple-icon-180x180.png"
+}
