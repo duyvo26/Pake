@@ -443,6 +443,34 @@ pub fn run_app() {
                 tauri_config.clone(),
             ));
 
+            // Load persisted accounts so the menu can list them on startup.
+            if let Some(state) = app.try_state::<MultiWindowState>() {
+                if let Ok(data_dir) = app.path().app_data_dir() {
+                    let _ = std::fs::create_dir_all(&data_dir);
+                    let accounts_path = crate::util::accounts_file_path(&data_dir);
+                    let active_path = crate::util::active_account_file_path(&data_dir);
+                    let mut accounts = crate::util::read_accounts(&accounts_path);
+                    if accounts.is_empty() {
+                        if let Some(w) = state.pake_config.windows.first() {
+                            accounts = w.accounts.clone();
+                        }
+                    }
+                    let active = crate::util::read_active_account(&active_path);
+                    if let Ok(mut slot) = state.accounts.lock() {
+                        *slot = accounts;
+                    }
+                    if let Ok(mut slot) = state.active_account_id.lock() {
+                        *slot = active;
+                    }
+                    if let Ok(mut slot) = state.accounts_path.lock() {
+                        *slot = Some(accounts_path);
+                    }
+                    if let Ok(mut slot) = state.active_account_path.lock() {
+                        *slot = Some(active_path);
+                    }
+                }
+            }
+
             // Main thread: installs the native notification-click delegate so a
             // click can be routed back to the page that raised the notification.
             app::notification::init_native_click(app.app_handle());

@@ -207,13 +207,54 @@ fn window_menu(app: &AppHandle<Wry>) -> tauri::Result<Submenu<Wry>> {
     let window_menu = Submenu::new(app, "Window", true)?;
     window_menu.append(&PredefinedMenuItem::minimize(app, None)?)?;
     window_menu.append(&PredefinedMenuItem::maximize(app, None)?)?;
-    window_menu.append(&MenuItem::with_id(
+
+    let accounts_menu = Submenu::new(app, "Accounts", true)?;
+    let mut has_accounts = false;
+    if let Some(state) = app.try_state::<MultiWindowState>() {
+        let accounts = state.accounts_snapshot();
+        if !accounts.is_empty() {
+            has_accounts = true;
+            let active = state.active_account();
+            for account in &accounts {
+                let id = format!("switch_account:{}", account.id);
+                let mut label = if account.label.trim().is_empty() {
+                    account.id.clone()
+                } else {
+                    account.label.clone()
+                };
+                if active.as_ref() == Some(&account.id) {
+                    label = format!("✓ {}", label);
+                }
+                accounts_menu.append(&MenuItem::with_id(app, &id, &label, true, None::<&str>)?)?;
+            }
+            accounts_menu.append(&PredefinedMenuItem::separator(app)?)?;
+        }
+    }
+    accounts_menu.append(&MenuItem::with_id(
         app,
-        "switch_account",
-        "Switch Account",
+        "save_current_account",
+        "Save Current Page as Account",
         true,
         None::<&str>,
     )?)?;
+    if has_accounts {
+        accounts_menu.append(&MenuItem::with_id(
+            app,
+            "remove_current_account",
+            "Remove Current Account",
+            true,
+            None::<&str>,
+        )?)?;
+    }
+    accounts_menu.append(&MenuItem::with_id(
+        app,
+        "switch_account",
+        "New Session (Clear Data)",
+        true,
+        None::<&str>,
+    )?)?;
+    window_menu.append(&accounts_menu)?;
+
     window_menu.append(&PredefinedMenuItem::separator(app)?)?;
     window_menu.append(&MenuItem::with_id(
         app,
@@ -385,16 +426,150 @@ pub fn handle_menu_click(app_handle: &AppHandle, id: &str) {
             }
         }
         "switch_account" => {
-            // Hand off to the focused webview: clear its browsing data and
-            // navigate back to the home URL, giving each switch a fresh session.
+            // New session: clear browsing data and return to home URL.
             if let Some(window) = focused_webview_window(app_handle) {
                 let _ = window.clear_all_browsing_data();
+                if let Some(state) = app_handle.try_state::<MultiWindowState>() {
+                    if let Ok(mut active) = state.active_account_id.lock() {
+                        *active = None;
+                    }
+                    if let Ok(path) = state.active_account_path.lock() {
+                        if let Some(path) = path.as_ref() {
+                            let _ = std::fs::remove_file(path);
+                        }
+                    }
+                }
                 if let Some(url) = home_url(app_handle) {
                     let _ = window.navigate(url);
                 }
             }
         }
-        _ => {}
+        "save_current_account" => {
+            if let Some(window) = focused_webview_window(app_handle) {
+                if let Some(state) = app_handle.try_state::<MultiWindowState>() {
+                    let current_url = window
+                        .url()
+                        .ok()
+                        .map(|u| u.to_string())
+                        .or_else(|| state.pake_config.windows.first().map(|w| w.url.clone()));
+                    let Some(url) = current_url else { return };
+                    let title = window.title().unwrap_or_default();
+                    let label = if title.trim().is_empty() || title == "Pake" {
+                        url.clone()
+                    } else {
+                        title
+                    };
+                    let id = format!(
+                        "acc_{}",
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis())
+                            .unwrap_or(0)
+                    );
+                    let account = crate::app::config::AccountConfig {
+                        id: id.clone(),
+                        label,
+                        url,
+                        incognito: false,
+                    };
+                    let mut accounts = state.accounts.lock().unwrap_or_else(|e| e.into_inner());
+                    accounts.push(account);
+                    let snapshot = accounts.clone();
+                    drop(accounts);
+                    if let Ok(mut active) = state.active_account_id.lock() {
+                        *active = Some(id.clone());
+                    }
+                    if let Ok(path) = state.accounts_path.lock() {
+                        if let Some(path) = path.as_ref() {
+                            let _ = crate::util::write_accounts(path, &snapshot);
+                        }
+                    }
+                    if let Ok(path) = state.active_account_path.lock() {
+                        if let Some(path) = path.as_ref() {
+                            let _ = crate::util::write_active_account(path, &id);
+                        }
+                    }
+                    // Rebuild menu to reflect new account list
+                    let _ = set_app_menu(
+                        app_handle,
+                        state.pake_config.multi_window,
+                        state
+                            .pake_config
+                            .windows
+                            .first()
+                            .map(|w| w.enable_find)
+                            .unwrap_or(false),
+                    );
+                }
+            }
+        }
+        "remove_current_account" => {
+            if let Some(state) = app_handle.try_state::<MultiWindowState>() {
+                let active = state.active_account();
+                if let Some(active_id) = active {
+                    let mut accounts = state.accounts.lock().unwrap_or_else(|e| e.into_inner());
+                    accounts.retain(|a| a.id != active_id);
+                    let snapshot = accounts.clone();
+                    drop(accounts);
+                    if let Ok(mut active) = state.active_account_id.lock() {
+                        *active = None;
+                    }
+                    if let Ok(path) = state.accounts_path.lock() {
+                        if let Some(path) = path.as_ref() {
+                            let _ = crate::util::write_accounts(path, &snapshot);
+                        }
+                    }
+                    if let Ok(path) = state.active_account_path.lock() {
+                        if let Some(path) = path.as_ref() {
+                            let _ = std::fs::remove_file(path);
+                        }
+                    }
+                    let _ = set_app_menu(
+                        app_handle,
+                        state.pake_config.multi_window,
+                        state
+                            .pake_config
+                            .windows
+                            .first()
+                            .map(|w| w.enable_find)
+                            .unwrap_or(false),
+                    );
+                }
+            }
+        }
+        _ => {
+            if let Some(account_id) = id.strip_prefix("switch_account:") {
+                if let Some(window) = focused_webview_window(app_handle) {
+                    if let Some(state) = app_handle.try_state::<MultiWindowState>() {
+                        let accounts = state.accounts_snapshot();
+                        if let Some(account) = accounts.iter().find(|a| a.id == account_id) {
+                            if let Ok(url) = tauri::Url::parse(&account.url) {
+                                let _ = window.navigate(url);
+                                if let Ok(mut active) = state.active_account_id.lock() {
+                                    *active = Some(account.id.clone());
+                                }
+                                if let Ok(path) = state.active_account_path.lock() {
+                                    if let Some(path) = path.as_ref() {
+                                        let _ =
+                                            crate::util::write_active_account(path, &account.id);
+                                    }
+                                }
+                                let _ = set_app_menu(
+                                    app_handle,
+                                    state.pake_config.multi_window,
+                                    state
+                                        .pake_config
+                                        .windows
+                                        .first()
+                                        .map(|w| w.enable_find)
+                                        .unwrap_or(false),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

@@ -206,6 +206,47 @@ pub fn write_last_url(path: &Path, url: &tauri::Url) -> std::io::Result<()> {
     Ok(())
 }
 
+pub fn accounts_file_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("accounts.json")
+}
+
+pub fn read_accounts(path: &Path) -> Vec<crate::app::config::AccountConfig> {
+    match std::fs::read_to_string(path) {
+        Ok(value) => serde_json::from_str(&value).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+pub fn write_accounts(
+    path: &Path,
+    accounts: &[crate::app::config::AccountConfig],
+) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_string_pretty(accounts)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    std::fs::write(path, json)
+}
+
+pub fn active_account_file_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("active-account.txt")
+}
+
+pub fn read_active_account(path: &Path) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+pub fn write_active_account(path: &Path, account_id: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, account_id)
+}
+
 /// The title bar color last painted on macOS, stored as `r,g,b`, so the next
 /// launch opens in it instead of flashing the default bar first.
 #[cfg(any(target_os = "macos", test))]

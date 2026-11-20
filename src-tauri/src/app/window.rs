@@ -83,6 +83,10 @@ pub struct MultiWindowState {
     pub pake_config: PakeConfig,
     pub tauri_config: Config,
     next_window_index: AtomicU32,
+    pub accounts: std::sync::Mutex<Vec<crate::app::config::AccountConfig>>,
+    pub active_account_id: std::sync::Mutex<Option<String>>,
+    pub accounts_path: std::sync::Mutex<Option<PathBuf>>,
+    pub active_account_path: std::sync::Mutex<Option<PathBuf>>,
 }
 
 impl MultiWindowState {
@@ -91,12 +95,24 @@ impl MultiWindowState {
             pake_config,
             tauri_config,
             next_window_index: AtomicU32::new(0),
+            accounts: std::sync::Mutex::new(Vec::new()),
+            active_account_id: std::sync::Mutex::new(None),
+            accounts_path: std::sync::Mutex::new(None),
+            active_account_path: std::sync::Mutex::new(None),
         }
     }
 
     fn next_window_label(&self) -> String {
         let index = self.next_window_index.fetch_add(1, Ordering::Relaxed) + 1;
         format!("{SECONDARY_WINDOW_LABEL_PREFIX}{index}")
+    }
+
+    pub fn accounts_snapshot(&self) -> Vec<crate::app::config::AccountConfig> {
+        self.accounts.lock().map(|a| a.clone()).unwrap_or_default()
+    }
+
+    pub fn active_account(&self) -> Option<String> {
+        self.active_account_id.lock().ok().and_then(|v| v.clone())
     }
 }
 

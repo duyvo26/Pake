@@ -53,6 +53,9 @@ pub struct WindowConfig {
     pub min_height: f64,
     #[serde(default)]
     pub ignore_certificate_errors: bool,
+    /// Saved web accounts for the Switch Account menu. Empty by default.
+    #[serde(default)]
+    pub accounts: Vec<AccountConfig>,
 }
 
 fn default_zoom() -> u32 {
@@ -81,6 +84,17 @@ impl WindowConfig {
     pub fn title_bar_follows_page(&self) -> bool {
         self.transparent_title_bar && !self.hide_title_bar
     }
+}
+
+/// A saved web account the user can switch back to from the menu. Stored per
+/// window config; `Switch Account` reloads the window with the next entry.
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct AccountConfig {
+    pub id: String,
+    pub label: String,
+    pub url: String,
+    #[serde(default)]
+    pub incognito: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
