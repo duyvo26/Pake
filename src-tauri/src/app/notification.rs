@@ -235,20 +235,23 @@ fn dispatch_click(app: &AppHandle, window_label: &str, id: &str) {
 
 #[cfg(target_os = "macos")]
 mod macos {
-    // The whole NSUserNotification family is deprecated in favour of
-    // UserNotifications.framework, which needs a provisioned bundle and a
-    // permission prompt that a webpage wrapper cannot meaningfully ask for.
-    // This is also the API the notification plugin already reaches through
-    // notify-rust, so staying on it keeps notification appearance unchanged.
-    #![allow(deprecated)]
+    // macOS 11 deprecated the whole NSUserNotification family, and on macOS 26
+    // `deliverNotification:` shows nothing at all, so Pake's own notifications
+    // silently vanished (a user's report, 2026-11-22). This module uses
+    // UserNotifications.framework instead: the same center a native chat app
+    // uses, with its own authorization prompt and click routing.
 
     use super::{dispatch_click, validate_id, NotificationParams};
+    use block2::RcBlock;
     use objc2::rc::Retained;
     use objc2::runtime::{AnyClass, ProtocolObject};
-    use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
-    use objc2_foundation::{
-        NSObject, NSObjectProtocol, NSString, NSUserNotification, NSUserNotificationCenter,
-        NSUserNotificationCenterDelegate,
+    use objc2::MainThreadMarker;
+    use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly};
+    use objc2_foundation::{NSArray, NSError, NSObject, NSObjectProtocol, NSString};
+    use objc2_user_notifications::{
+        UNAuthorizationOptions, UNMutableNotificationContent, UNNotification,
+        UNNotificationPresentationOptions, UNNotificationRequest, UNNotificationResponse,
+        UNNotificationSound, UNUserNotificationCenter, UNUserNotificationCenterDelegate,
     };
     use std::cell::OnceCell;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -270,33 +273,46 @@ mod macos {
         // - Delegate does not implement Drop.
         #[unsafe(super(NSObject))]
         #[thread_kind = MainThreadOnly]
-        #[name = "PakeUserNotificationDelegate"]
+        #[name = "PakeUNNotificationDelegate"]
         #[ivars = DelegateIvars]
         struct Delegate;
 
         unsafe impl NSObjectProtocol for Delegate {}
 
-        unsafe impl NSUserNotificationCenterDelegate for Delegate {
-            #[unsafe(method(userNotificationCenter:didActivateNotification:))]
-            fn did_activate(
+        unsafe impl UNUserNotificationCenterDelegate for Delegate {
+            // Show the banner even while Pake is frontmost: the window that owns
+            // the conversation may be hidden, and the click routes the page there.
+            #[unsafe(method(userNotificationCenter:willPresentNotification:withCompletionHandler:))]
+            unsafe fn will_present(
                 &self,
-                center: &NSUserNotificationCenter,
-                notification: &NSUserNotification,
+                _center: &UNUserNotificationCenter,
+                _notification: &UNNotification,
+                completion_handler: &block2::DynBlock<dyn Fn(UNNotificationPresentationOptions)>,
             ) {
-                // Read the identifier before removing: keep the two steps
-                // independent of any ordering assumption about the removal.
-                let raw = notification.identifier().map(|s| s.to_string());
+                let options = UNNotificationPresentationOptions::Banner
+                    | UNNotificationPresentationOptions::List
+                    | UNNotificationPresentationOptions::Sound;
+                completion_handler.call((options,));
+            }
 
-                // NSUserNotificationCenter keeps an activated notification in
-                // Notification Center; without this it piles up after every click.
-                center.removeDeliveredNotification(notification);
+            #[unsafe(method(userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:))]
+            unsafe fn did_receive(
+                &self,
+                center: &UNUserNotificationCenter,
+                response: &UNNotificationResponse,
+                completion_handler: &block2::DynBlock<dyn Fn()>,
+            ) {
+                let identifier = response.notification().request().identifier().to_string();
 
-                let Some(identifier) = raw else {
-                    return;
-                };
-                // `rsplit_once` because a popup window label comes from the
-                // page's `window.open` name and may itself contain '|', while
-                // the id never can.
+                // Clearing the delivered entry keeps Notification Center from
+                // piling up one banner per click. The identifier is the request
+                // id, which is this notification's own only.
+                let ids = NSArray::from_retained_slice(&[NSString::from_str(&identifier)]);
+                center.removeDeliveredNotificationsWithIdentifiers(&ids);
+
+                completion_handler.call(());
+                // `rsplit_once` because a popup window label from the page's
+                // `window.open` name may contain '|', while the id never can.
                 let Some((label, id)) = identifier.rsplit_once('|') else {
                     return;
                 };
@@ -304,18 +320,6 @@ mod macos {
                     return;
                 }
                 dispatch_click(&self.ivars().app, label, id);
-            }
-
-            // Show the banner even when Pake is frontmost: the window that owns
-            // the conversation may still be hidden or in the background, and the
-            // click is what routes the page there.
-            #[unsafe(method(userNotificationCenter:shouldPresentNotification:))]
-            fn should_present(
-                &self,
-                _center: &NSUserNotificationCenter,
-                _notification: &NSUserNotification,
-            ) -> bool {
-                true
             }
         }
     );
@@ -327,88 +331,99 @@ mod macos {
         }
     }
 
-    /// `defaultUserNotificationCenter` is nil for a process without a bundle
-    /// identifier (`pnpm run dev` runs the bare binary), and the class itself
-    /// disappears if a future macOS finally drops the deprecated API. Probe once
-    /// here rather than risking a nil dereference on every notification.
-    fn default_center(mtm: MainThreadMarker) -> Option<Retained<NSUserNotificationCenter>> {
-        let _ = mtm;
-        let class = AnyClass::get(c"NSUserNotificationCenter")?;
-        unsafe { msg_send![class, defaultUserNotificationCenter] }
+    /// `currentNotificationCenter` raises for a process with no bundle
+    /// identifier (`pnpm run dev` runs the bare binary), so probe the class
+    /// first instead of letting an exception escape into every notification.
+    fn center() -> Option<Retained<UNUserNotificationCenter>> {
+        AnyClass::get(c"UNUserNotificationCenter")?;
+        Some(UNUserNotificationCenter::currentNotificationCenter())
     }
 
     pub fn init(app: &AppHandle) {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
-        let Some(center) = default_center(mtm) else {
+        let Some(center) = center() else {
             return;
         };
 
         DELEGATE.with(|cell| {
             let delegate = cell.get_or_init(|| Delegate::new(mtm, app.clone()));
-            unsafe { center.setDelegate(Some(ProtocolObject::from_ref(&**delegate))) };
+            center.setDelegate(Some(ProtocolObject::from_ref(&**delegate)));
         });
         NATIVE_CLICK_READY.store(true, Ordering::SeqCst);
+
+        // Without an explicit request macOS never prompts, and every
+        // notification is dropped silently. Ask once, at startup.
+        let options = UNAuthorizationOptions::Alert
+            | UNAuthorizationOptions::Sound
+            | UNAuthorizationOptions::Badge;
+        let handler = RcBlock::new(|granted: objc2::runtime::Bool, error: *mut NSError| {
+            if !error.is_null() {
+                let message = unsafe { (*error).localizedDescription() };
+                eprintln!("[Pake] Notification authorization failed: {message}");
+            } else if !granted.as_bool() {
+                eprintln!(
+                    "[Pake] Notifications are turned off for this app; enable them in System Settings > Notifications."
+                );
+            }
+        });
+        center.requestAuthorizationWithOptions_completionHandler(options, &handler);
     }
 
     pub fn native_click_ready() -> bool {
         NATIVE_CLICK_READY.load(Ordering::SeqCst)
     }
 
-    /// Returns whether the notification was handed to the native center. `false`
-    /// means the caller should fall back to the plugin path.
+    /// Hand a notification to the system center. `false` means the caller
+    /// should fall back to the plugin path.
     pub fn deliver(
-        app: &AppHandle,
+        _app: &AppHandle,
         window_label: &str,
         params: &NotificationParams,
     ) -> Result<bool, String> {
         if !NATIVE_CLICK_READY.load(Ordering::SeqCst) {
             return Ok(false);
         }
+        let Some(center) = center() else {
+            return Ok(false);
+        };
 
-        let identifier = format!("{window_label}|{}", params.id);
-        let title = params.title.clone();
-        let body = params.body.clone();
+        let identifier = NSString::from_str(&format!("{window_label}|{}", params.id));
+        let content = UNMutableNotificationContent::new();
+        content.setTitle(&NSString::from_str(&params.title));
+        content.setBody(&NSString::from_str(&params.body));
+        if !params.silent {
+            content.setSound(Some(&UNNotificationSound::defaultSound()));
+        }
 
-        app.run_on_main_thread(move || {
-            let Some(mtm) = MainThreadMarker::new() else {
-                return;
-            };
-            let Some(center) = default_center(mtm) else {
-                return;
-            };
-
-            let notification = NSUserNotification::new();
-            notification.setTitle(Some(&NSString::from_str(&title)));
-            notification.setInformativeText(Some(&NSString::from_str(&body)));
-            notification.setIdentifier(Some(&NSString::from_str(&identifier)));
-            center.deliverNotification(&notification);
-        })
-        .map_err(|e| format!("Failed to dispatch notification: {e}"))?;
-
+        // No trigger delivers immediately.
+        let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
+            &identifier,
+            &content,
+            None,
+        );
+        let handler = RcBlock::new(|error: *mut NSError| {
+            if !error.is_null() {
+                let message = unsafe { (*error).localizedDescription() };
+                eprintln!("[Pake] Failed to deliver notification: {message}");
+            }
+        });
+        center.addNotificationRequest_withCompletionHandler(&request, Some(&handler));
         Ok(true)
     }
 
-    pub fn withdraw(app: &AppHandle, window_label: &str, id: &str) -> Result<(), String> {
+    pub fn withdraw(_app: &AppHandle, window_label: &str, id: &str) -> Result<(), String> {
+        let Some(center) = center() else {
+            return Ok(());
+        };
         let identifier = format!("{window_label}|{id}");
-        app.run_on_main_thread(move || {
-            let Some(mtm) = MainThreadMarker::new() else {
-                return;
-            };
-            let Some(center) = default_center(mtm) else {
-                return;
-            };
-            for notification in center.deliveredNotifications() {
-                if notification
-                    .identifier()
-                    .is_some_and(|value| value.to_string() == identifier)
-                {
-                    center.removeDeliveredNotification(&notification);
-                }
-            }
-        })
-        .map_err(|e| format!("Failed to withdraw notification: {e}"))
+        let ids = NSArray::from_retained_slice(&[NSString::from_str(&identifier)]);
+        // Both lists matter: a pending request has not been shown, a delivered
+        // one is still in Notification Center.
+        center.removePendingNotificationRequestsWithIdentifiers(&ids);
+        center.removeDeliveredNotificationsWithIdentifiers(&ids);
+        Ok(())
     }
 }
 

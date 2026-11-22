@@ -1320,12 +1320,14 @@ fn build_window(
     }
 
     // Every webview is built here (main window, Cmd+N clones, --new-window and
-    // blank two-stage popups), so trackpad history swipes match in all of them.
+    // blank two-stage popups), so trackpad history swipes match in all of them,
+    // and hiding a window never suspends its page.
     #[cfg(target_os = "macos")]
     if let Err(error) = window.with_webview(|webview| {
         crate::app::navigation::enable_back_forward_gestures(&webview);
+        crate::app::navigation::keep_running_when_hidden(&webview);
     }) {
-        eprintln!("[Pake] Failed to access WKWebView for history swipe gestures: {error}");
+        eprintln!("[Pake] Failed to access WKWebView for gestures and hidden state: {error}");
     }
 
     // A page's alert(), confirm() and prompt() show nothing in a WKWebView

@@ -54,6 +54,36 @@ pub fn set_password_autosave(webview: &tauri::webview::PlatformWebview, enabled:
     }
 }
 
+/// Stop WebKit from treating the webview as occluded when its window is hidden.
+///
+/// `hide_on_close` hides the window instead of closing it, and WebKit's window
+/// occlusion detection then suspends the page: timers slow down, and the site's
+/// long-lived socket stops being serviced, so a chat app only showed new messages
+/// after the window was shown again (a user's report, 2026-11-22).
+///
+/// `_setWindowOcclusionDetectionEnabled:` is a private WKWebView switch that
+/// every chat-style wrapper uses for exactly this; the call is skipped when a
+/// future WebKit stops answering the selector.
+#[cfg(target_os = "macos")]
+pub fn keep_running_when_hidden(webview: &tauri::webview::PlatformWebview) {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyObject, Bool};
+
+    let ptr = webview.inner() as *mut AnyObject;
+    if ptr.is_null() {
+        eprintln!("[Pake] Failed to access WKWebView for occlusion settings");
+        return;
+    }
+    let selector = objc2::sel!(setWindowOcclusionDetectionEnabled:);
+    let responds: Bool = unsafe { msg_send![ptr, respondsToSelector: selector] };
+    if !responds.as_bool() {
+        return;
+    }
+    unsafe {
+        let _: () = msg_send![ptr, setWindowOcclusionDetectionEnabled: Bool::NO];
+    }
+}
+
 /// Let a two-finger horizontal trackpad swipe step history, as in Safari.
 ///
 /// WKWebView leaves `allowsBackForwardNavigationGestures` off, and Tauri does
