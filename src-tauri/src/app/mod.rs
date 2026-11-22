@@ -11,6 +11,7 @@ pub mod content_blocking;
 pub mod download;
 pub mod download_folder;
 pub mod invoke;
+pub mod keep_awake;
 #[cfg(target_os = "linux")]
 pub mod media_permission;
 #[cfg(target_os = "macos")]

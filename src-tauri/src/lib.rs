@@ -506,9 +506,24 @@ pub fn run_app() {
                 }
             }
 
+            // A hidden window must keep handling its sockets: otherwise a chat
+            // app only shows new messages after the window is shown again.
+            app::keep_awake::keep_awake_while_hidden();
+
             // Main thread: installs the native notification-click delegate so a
             // click can be routed back to the page that raised the notification.
             app::notification::init_native_click(app.app_handle());
+
+            // macOS shows nothing until the user allows notifications for this
+            // app; ask once at startup so a site's notifications are not lost
+            // to a missing prompt.
+            #[cfg(target_os = "macos")]
+            {
+                use tauri_plugin_notification::NotificationExt;
+                if let Err(error) = app.notification().request_permission() {
+                    eprintln!("[Pake] Could not request notification permission: {error}");
+                }
+            }
 
             // --- Menu Construction Start ---
             #[cfg(target_os = "macos")]
