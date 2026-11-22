@@ -87,6 +87,9 @@ pub struct MultiWindowState {
     pub active_account_id: std::sync::Mutex<Option<String>>,
     pub accounts_path: std::sync::Mutex<Option<PathBuf>>,
     pub active_account_path: std::sync::Mutex<Option<PathBuf>>,
+    /// Folder the user picked at runtime, overriding the build-time
+    /// `download_dir` until they change it again.
+    pub download_dir_override: std::sync::Mutex<Option<PathBuf>>,
 }
 
 impl MultiWindowState {
@@ -99,6 +102,7 @@ impl MultiWindowState {
             active_account_id: std::sync::Mutex::new(None),
             accounts_path: std::sync::Mutex::new(None),
             active_account_path: std::sync::Mutex::new(None),
+            download_dir_override: std::sync::Mutex::new(None),
         }
     }
 

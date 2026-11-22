@@ -47,13 +47,19 @@ tauri-plugin-notification = "2.3.3"
 block2 = "0.6"
 dispatch = "0.2"
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSDockTile", "NSWindow"] }
+objc2-app-kit = { version = "0.3", features = [
+  "NSApplication",
+  "NSDockTile",
+  "NSOpenPanel",
+  "NSWindow",
+] }
 objc2-foundation = { version = "0.3", features = [
   "NSArray",
   "NSEnumerator",
   "NSError",
   "NSLocale",
   "NSString",
+  "NSURL",
   "NSUserNotification",
 ] }
 objc2-web-kit = { version = "0.3", default-features = false, features = [

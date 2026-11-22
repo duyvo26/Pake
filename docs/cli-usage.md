@@ -629,7 +629,9 @@ Choose where the packaged app saves downloads. Both regular link downloads and n
 pake https://example.com --name MyApp --download-dir '~/Documents/MyApp'
 ```
 
-Use an absolute path (such as `C:\Users\Alice\Documents\MyApp` on Windows) or a quoted `~/path`. Quoting preserves `~` so it resolves to the app user's home when the app runs, rather than the build machine's home. Missing directories are created on the first download. Relative paths are rejected; an inaccessible directory causes the download to fail without silently saving elsewhere. The equivalent JSON config field is `downloadDir`. Rebuild an existing app to change its download directory.
+Use an absolute path (such as `C:\Users\Alice\Documents\MyApp` on Windows) or a quoted `~/path`. Quoting preserves `~` so it resolves to the app user's home when the app runs, rather than the build machine's home. Missing directories are created on the first download. Relative paths are rejected; an inaccessible directory causes the download to fail without silently saving elsewhere. The equivalent JSON config field is `downloadDir`. Rebuild an existing app to change its packaged default.
+
+The packaged app can also change this folder at runtime without a rebuild: on macOS, **File → Change Download Folder…** opens the system folder chooser. The choice is remembered for later launches and takes precedence over the build-time setting; pick again to change it.
 
 #### [proxy-url]
 

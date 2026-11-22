@@ -481,6 +481,14 @@ pub fn run_app() {
                     if let Ok(mut slot) = state.active_account_path.lock() {
                         *slot = Some(active_path);
                     }
+                    // A download folder the user picked at runtime outlives the
+                    // build-time setting and applies from the first download.
+                    let download_dir_path = crate::util::download_dir_file_path(&data_dir);
+                    if let Some(picked) = crate::util::read_download_dir(&download_dir_path) {
+                        if let Ok(mut slot) = state.download_dir_override.lock() {
+                            *slot = Some(picked);
+                        }
+                    }
                 }
             }
 

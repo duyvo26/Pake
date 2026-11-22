@@ -9,6 +9,7 @@ pub mod config;
 pub mod content_blocking;
 #[cfg(target_os = "windows")]
 pub mod download;
+pub mod download_folder;
 pub mod invoke;
 #[cfg(target_os = "linux")]
 pub mod media_permission;

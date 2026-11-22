@@ -74,6 +74,14 @@ fn file_menu(app: &AppHandle<Wry>, allow_multi_window: bool) -> tauri::Result<Su
     file_menu.append(&PredefinedMenuItem::separator(app)?)?;
     file_menu.append(&MenuItem::with_id(
         app,
+        "change_download_folder",
+        "Change Download Folder…",
+        true,
+        None::<&str>,
+    )?)?;
+    file_menu.append(&PredefinedMenuItem::separator(app)?)?;
+    file_menu.append(&MenuItem::with_id(
+        app,
         "clear_cache_restart",
         "Clear Cache & Restart",
         true,
@@ -432,6 +440,41 @@ pub fn handle_menu_click(app_handle: &AppHandle, id: &str) {
         "find_previous" => {
             if let Some(window) = focused_webview_window(app_handle) {
                 let _ = window.eval("window.pakeFind?.previous()");
+            }
+        }
+        "change_download_folder" => {
+            // NSOpenPanel is main-thread only, so the picker runs there and the
+            // answer comes back to this handler thread.
+            let app = app_handle.clone();
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let spawned = app_handle.run_on_main_thread(move || {
+                let current = crate::util::get_download_dir(&app).ok();
+                let picked = crate::app::download_folder::pick_folder(current.as_deref());
+                let _ = sender.send(picked);
+            });
+            if let Err(error) = spawned {
+                eprintln!("[Pake] Could not open the folder picker: {error}");
+                return;
+            }
+            // The block runs on the main thread; waiting here is what keeps the
+            // result ordered with the rest of the menu handling.
+            let Ok(picked) = receiver.recv() else { return };
+            let Some(directory) = picked else { return };
+
+            if let Some(state) = app_handle.try_state::<MultiWindowState>() {
+                if let Ok(mut slot) = state.download_dir_override.lock() {
+                    *slot = Some(directory.clone());
+                }
+            }
+            if let Ok(data_dir) = app_handle.path().app_data_dir() {
+                let path = crate::util::download_dir_file_path(&data_dir);
+                if let Err(error) = crate::util::write_download_dir(&path, &directory) {
+                    eprintln!("[Pake] Could not remember the download folder: {error}");
+                }
+            }
+            if let Some(window) = focused_webview_window(app_handle) {
+                let message = format!("Downloads: {}", directory.display());
+                crate::util::show_toast(&window, &message);
             }
         }
         "clear_cache_restart" => {

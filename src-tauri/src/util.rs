@@ -233,6 +233,24 @@ pub fn active_account_file_path(data_dir: &Path) -> PathBuf {
     data_dir.join("active-account.txt")
 }
 
+/// The folder the user chose at runtime, remembered across launches.
+pub fn download_dir_file_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("download-dir.txt")
+}
+
+pub fn read_download_dir(path: &Path) -> Option<PathBuf> {
+    let value = std::fs::read_to_string(path).ok()?;
+    let path = PathBuf::from(value.trim());
+    (path.is_absolute() && !path.as_os_str().is_empty()).then_some(path)
+}
+
+pub fn write_download_dir(path: &Path, directory: &Path) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, directory.to_string_lossy().as_bytes())
+}
+
 pub fn read_active_account(path: &Path) -> Option<String> {
     std::fs::read_to_string(path)
         .ok()
@@ -301,6 +319,18 @@ pub fn get_download_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let state = app
         .try_state::<MultiWindowState>()
         .ok_or("Missing app download configuration")?;
+    // A folder the user picked at runtime wins over the build-time setting, so
+    // "Change Download Folder…" takes effect without rebuilding the app.
+    if let Some(picked) = state
+        .download_dir_override
+        .lock()
+        .ok()
+        .and_then(|slot| slot.clone())
+    {
+        std::fs::create_dir_all(&picked)
+            .map_err(|e| format!("Cannot create download directory {}: {e}", picked.display()))?;
+        return Ok(picked);
+    }
     let configured = &state.pake_config.download_dir;
     let directory = if configured.is_empty() {
         app.path().download_dir().map_err(|e| e.to_string())?
