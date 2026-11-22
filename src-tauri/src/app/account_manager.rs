@@ -242,11 +242,26 @@ pub fn remove_account(app: AppHandle<Wry>, id: String) -> Result<(), String> {
             }
         }
     }
+    // Drop the account's isolated cookie jar too; leaving it behind would keep
+    // its logins on disk and leak storage for accounts the user deleted.
+    #[cfg(target_os = "macos")]
+    {
+        let store = crate::app::window::data_store_id_for_account(&id);
+        let cleanup_app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(error) = cleanup_app.remove_data_store(store).await {
+                eprintln!("[Pake] Could not remove the account data store: {error}");
+            }
+        });
+    }
     persist_accounts(&app, &snapshot)
 }
 
-/// Navigate the main window to the saved account and mark it active. The
-/// manager window closes itself afterwards; other callers keep their window.
+/// Switch to a saved account and mark it active.
+///
+/// On macOS this rebuilds the home webview with the account's own data store,
+/// because a webview's cookies are fixed when it is created; navigating alone
+/// would keep the previous login. The manager window closes itself afterwards.
 #[tauri::command]
 pub fn switch_account_to(
     app: AppHandle<Wry>,
@@ -259,23 +274,37 @@ pub fn switch_account_to(
         .find(|account| account.id == id)
         .ok_or("Account not found")?;
     let url = Url::parse(&account.url).map_err(|error| format!("Invalid saved URL: {error}"))?;
-    let main = app
-        .get_webview_window("pake")
-        .ok_or("Main window not found")?;
-    main.navigate(url).map_err(|error| error.to_string())?;
+    let account_id = account.id.clone();
 
+    // Record the new active account before rebuilding: the replacement webview
+    // reads it to pick its data store.
     let state = app
         .try_state::<MultiWindowState>()
         .ok_or("Missing app state")?;
     if let Ok(mut active) = state.active_account_id.lock() {
-        *active = Some(account.id.clone());
+        *active = Some(account_id.clone());
     }
     if let Ok(path) = state.active_account_path.lock() {
         if let Some(path) = path.as_ref() {
-            let _ = crate::util::write_active_account(path, &account.id);
+            let _ = crate::util::write_active_account(path, &account_id);
         }
     }
     persist_accounts(&app, &accounts)?;
+
+    // A cookie jar belongs to the webview that owns it. Navigating the existing
+    // webview kept the previous login (a user's report, 2026-11-22), so rebuild
+    // the home webview with this account's own data store instead.
+    #[cfg(target_os = "macos")]
+    crate::app::window::reopen_home_window_for_account(&app, url)
+        .map_err(|error| format!("Failed to switch account: {error}"))?;
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let main = app
+            .get_webview_window("pake")
+            .ok_or("Main window not found")?;
+        main.navigate(url).map_err(|error| error.to_string())?;
+    }
 
     if window.label() == MANAGER_WINDOW_LABEL {
         let _ = window.close();

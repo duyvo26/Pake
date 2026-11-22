@@ -240,10 +240,104 @@ struct WindowBuildOptions<'a> {
     url: WebviewUrl,
     visible: bool,
     new_window_features: Option<NewWindowFeatures>,
+    /// macOS 14+: keep this webview's cookies and storage in its own
+    /// `WKWebsiteDataStore`, so two accounts of the same site never share a
+    /// login. Unsupported platforms ignore it (they key off `data_directory`).
+    data_store_identifier: Option<[u8; 16]>,
 }
 
 fn is_blank_popup_url(url: &Url) -> bool {
     url.scheme() == "about" && url.path() == "blank"
+}
+
+/// A stable 16-byte data store id for an account. macOS keys
+/// `WKWebsiteDataStore` by UUID, so the same account id must always map to the
+/// same store across launches, and two accounts must never collide.
+///
+/// FNV-1a over the id gives the body; the version and variant nibbles are set
+/// so the value is a well-formed UUIDv4 rather than arbitrary bytes.
+pub fn data_store_id_for_account(account_id: &str) -> [u8; 16] {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in account_id.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let mut bytes = [0u8; 16];
+    bytes[..8].copy_from_slice(&hash.to_be_bytes());
+    // A second, differently seeded pass keeps 17+ byte ids from colliding on
+    // the first 8 bytes alone.
+    let mut hash2: u64 = 0x9e37_79b9_7f4a_7c15;
+    for byte in account_id.as_bytes().iter().rev() {
+        hash2 ^= u64::from(*byte);
+        hash2 = hash2.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    bytes[8..].copy_from_slice(&hash2.to_be_bytes());
+    // UUIDv4 layout: version 4 in the high nibble of byte 6, RFC 4122 variant
+    // (`10`) in the top bits of byte 8.
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    bytes
+}
+
+/// The data store of the account the app is currently showing, if any. Windows
+/// built for the active account (home window, Cmd+N clones, popups) inherit it
+/// so they all read the same cookies.
+#[cfg(target_os = "macos")]
+fn active_data_store(app: &AppHandle) -> Option<[u8; 16]> {
+    let state = app.try_state::<MultiWindowState>()?;
+    if state.pake_config.windows.first()?.incognito {
+        return None;
+    }
+    state
+        .active_account()
+        .map(|account_id| data_store_id_for_account(&account_id))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn active_data_store(_app: &AppHandle) -> Option<[u8; 16]> {
+    None
+}
+
+#[cfg(test)]
+mod account_store_tests {
+    use super::data_store_id_for_account;
+
+    #[test]
+    fn an_account_id_maps_to_the_same_uuid_every_time() {
+        // macOS keys the data store by UUID; a different value on the next
+        // launch would strand the account's cookies in an orphaned store.
+        let first = data_store_id_for_account("acc_1700000000000_1");
+        let second = data_store_id_for_account("acc_1700000000000_1");
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn different_accounts_get_different_stores() {
+        let a = data_store_id_for_account("acc_1700000000000_1");
+        let b = data_store_id_for_account("acc_1700000000000_2");
+        assert_ne!(a, b);
+        // Two ids sharing a long prefix differ only in the last byte; the
+        // reverse pass exists so they still land on different stores.
+        let c = data_store_id_for_account("acc_1700000000000_1");
+        let d = data_store_id_for_account("acc_1700000000000_9");
+        assert_ne!(c, d);
+    }
+
+    #[test]
+    fn stores_are_well_formed_uuids() {
+        for id in ["acc_1", "a", "", "acc_1700000000000_42"] {
+            let bytes = data_store_id_for_account(id);
+            // Version 4 in the high nibble of byte 6 and the RFC 4122 variant
+            // in the top bits of byte 8: AppKit rejects anything else.
+            assert_eq!(bytes[6] & 0xf0, 0x40, "version for {id:?}");
+            assert_eq!(bytes[8] & 0xc0, 0x80, "variant for {id:?}");
+        }
+    }
+
+    #[test]
+    fn empty_ids_are_not_all_zero() {
+        assert_ne!(data_store_id_for_account(""), [0u8; 16]);
+    }
 }
 
 #[cfg(test)]
@@ -285,6 +379,9 @@ fn open_requested_window(
             url: WebviewUrl::External(target_url.clone()),
             visible: true,
             new_window_features: Some(features),
+            // Popups join their opener's session: an auth or window.open flow
+            // belongs to the account that started it.
+            data_store_identifier: active_data_store(app),
         },
     )?;
 
@@ -315,8 +412,68 @@ pub fn open_internal_page_window(
             url: WebviewUrl::CustomProtocol(url),
             visible: false,
             new_window_features: None,
+            // The manager is Pake's own page; it belongs to no account session.
+            data_store_identifier: None,
         },
     )
+}
+
+/// Replace the home webview so the new account gets its own cookie jar.
+///
+/// WKWebView fixes its data store when the webview is created, so a running
+/// webview cannot adopt another account's cookies; only a new webview can. The
+/// old window keeps its frame, the replacement opens at the same position and
+/// size, and the caller has already marked the target account active so
+/// `active_data_store` hands `build_window` the right identifier.
+#[cfg(target_os = "macos")]
+pub fn reopen_home_window_for_account(app: &AppHandle, url: Url) -> tauri::Result<()> {
+    let state = app.state::<MultiWindowState>();
+    let old = app.get_webview_window("pake");
+
+    // Remember the on-screen frame before the old window goes away; the window
+    // state plugin also persists it, but that write races the rebuild.
+    let frame = old.as_ref().and_then(|window| {
+        let position = window.outer_position().ok()?;
+        let size = window.outer_size().ok()?;
+        Some((position, size))
+    });
+    let was_fullscreen = old
+        .as_ref()
+        .and_then(|window| window.is_fullscreen().ok())
+        .unwrap_or(false);
+
+    if let Some(window) = old {
+        // Hide first so the swap never flashes an empty frame, then close. A
+        // close request would be intercepted by hide-on-close, which only hides
+        // the old window and would keep its webview (and cookie jar) alive.
+        let _ = window.hide();
+        if let Err(error) = window.destroy() {
+            eprintln!("[Pake] Failed to close the previous account window: {error}");
+        }
+    }
+
+    let window = build_window_with_label_and_store(
+        app,
+        &state.pake_config,
+        &state.tauri_config,
+        "pake",
+        WebviewUrl::External(url),
+        active_data_store(app),
+    )?;
+
+    if let Some((position, size)) = frame {
+        let _ = window.set_position(position);
+        let _ = window.set_size(size);
+    }
+    if was_fullscreen {
+        let _ = window.set_fullscreen(true);
+    }
+
+    let _ = window.show();
+    reapply_window_icon(&window);
+    enter_configured_fullscreen(&window);
+    let _ = window.set_focus();
+    Ok(())
 }
 
 /// Open a multi-window clone of the home app. The window is built hidden and
@@ -451,13 +608,52 @@ fn build_window_with_label(
     tauri_config: &Config,
     label: &str,
 ) -> tauri::Result<WebviewWindow> {
+    let url = home_webview_url(config)?;
+    build_window_with_label_and_store(
+        app,
+        config,
+        tauri_config,
+        label,
+        url,
+        active_data_store(app),
+    )
+}
+
+/// Build a window whose webview starts at `url` instead of the configured entry
+/// page, with an explicit data store. The account switch uses this to give the
+/// rebuilt home window its own cookie jar.
+#[cfg(target_os = "macos")]
+fn build_window_with_label_and_store(
+    app: &AppHandle,
+    config: &PakeConfig,
+    tauri_config: &Config,
+    label: &str,
+    url: WebviewUrl,
+    data_store_identifier: Option<[u8; 16]>,
+) -> tauri::Result<WebviewWindow> {
+    build_window(
+        app,
+        config,
+        tauri_config,
+        WindowBuildOptions {
+            label,
+            url,
+            visible: false,
+            new_window_features: None,
+            data_store_identifier,
+        },
+    )
+}
+
+/// The configured entry page as a webview URL.
+fn home_webview_url(config: &PakeConfig) -> tauri::Result<WebviewUrl> {
     let window_config = config.windows.first().ok_or_else(|| {
         tauri::Error::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "pake.json must define at least one window configuration",
         ))
     })?;
-    let url = match window_config.url_type.as_str() {
+    match window_config.url_type.as_str() {
         "web" => {
             let parsed = window_config.url.parse().map_err(|err| {
                 tauri::Error::Io(std::io::Error::new(
@@ -468,28 +664,14 @@ fn build_window_with_label(
                     ),
                 ))
             })?;
-            WebviewUrl::App(parsed)
+            Ok(WebviewUrl::App(parsed))
         }
-        "local" => WebviewUrl::App(PathBuf::from(&window_config.url)),
-        other => {
-            return Err(tauri::Error::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("url_type must be 'web' or 'local', got '{other}'"),
-            )));
-        }
-    };
-
-    build_window(
-        app,
-        config,
-        tauri_config,
-        WindowBuildOptions {
-            label,
-            url,
-            visible: false,
-            new_window_features: None,
-        },
-    )
+        "local" => Ok(WebviewUrl::App(PathBuf::from(&window_config.url))),
+        other => Err(tauri::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("url_type must be 'web' or 'local', got '{other}'"),
+        ))),
+    }
 }
 
 fn build_window(
@@ -503,6 +685,7 @@ fn build_window(
         url,
         visible,
         new_window_features,
+        data_store_identifier,
     } = opts;
     #[cfg(target_os = "macos")]
     let use_native_window_tabbing = config.multi_window && new_window_features.is_none();
@@ -670,6 +853,16 @@ fn build_window(
     window_builder = window_builder
         .always_on_top(window_config.always_on_top)
         .incognito(window_config.incognito);
+
+    // Per-account isolation: a webview with its own data store keeps separate
+    // cookies and storage, so switching accounts never inherits the previous
+    // login. macOS 14+ only; older systems keep the shared default store.
+    #[cfg(target_os = "macos")]
+    if let Some(identifier) = data_store_identifier.filter(|_| !window_config.incognito) {
+        window_builder = window_builder.data_store_identifier(identifier);
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = data_store_identifier;
 
     // macOS enters full screen once the window is shown (`enter_configured_fullscreen`):
     // tao gives a window built full screen the screen's frame as its own size, so
