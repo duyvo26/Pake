@@ -16,6 +16,11 @@ fn main() {
             "set_title_bar_color",
             "quit_app",
             "reveal_download",
+            "list_accounts",
+            "add_account",
+            "update_account",
+            "remove_account",
+            "switch_account_to",
         ]),
     ))
     .expect("Failed to build Pake permissions")

@@ -296,6 +296,29 @@ fn open_requested_window(
     Ok(window)
 }
 
+/// Build a window for an app-internal local page (custom protocol) through the
+/// shared builder, so it gets the same per-webview installs (history gestures,
+/// script dialogs, downloads) as the main window, clones and popups. Built
+/// hidden; callers reveal it on page load or their own fallback timer.
+pub fn open_internal_page_window(
+    app: &AppHandle,
+    label: &str,
+    url: Url,
+) -> tauri::Result<WebviewWindow> {
+    let state = app.state::<MultiWindowState>();
+    build_window(
+        app,
+        &state.pake_config,
+        &state.tauri_config,
+        WindowBuildOptions {
+            label,
+            url: WebviewUrl::CustomProtocol(url),
+            visible: false,
+            new_window_features: None,
+        },
+    )
+}
+
 /// Open a multi-window clone of the home app. The window is built hidden and
 /// revealed on its first real page load (see `lib.rs` on_page_load) so Cmd+N
 /// does not flash an empty shell the way the main window used to.

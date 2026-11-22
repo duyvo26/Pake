@@ -1,3 +1,4 @@
+pub mod account_manager;
 #[cfg(target_os = "macos")]
 pub mod auth;
 pub mod autostart;

@@ -30,6 +30,9 @@ const GDK_BACKEND: &str = "GDK_BACKEND";
 #[cfg(target_os = "macos")]
 use app::window::enter_configured_fullscreen;
 use app::{
+    account_manager::{
+        add_account, list_accounts, remove_account, switch_account_to, update_account,
+    },
     invoke::{
         clear_dock_badge, close_notification, download_file, increment_dock_badge, quit_app,
         reveal_download, send_notification, set_dock_badge, set_dock_badge_label,
@@ -416,6 +419,11 @@ pub fn run_app() {
     let reopen_revealed = startup_window_revealed.clone();
 
     app_builder
+        // Account manager page: a small local UI embedded in the binary and
+        // served in its own window over this scheme (see account_manager.rs).
+        .register_uri_scheme_protocol("pakeaccounts", |_context, request| {
+            app::account_manager::serve(request)
+        })
         .invoke_handler(tauri::generate_handler![
             download_file,
             send_notification,
@@ -430,6 +438,11 @@ pub fn run_app() {
             set_title_bar_color,
             quit_app,
             reveal_download,
+            list_accounts,
+            add_account,
+            update_account,
+            remove_account,
+            switch_account_to,
         ])
         .setup(move |app| {
             // Grant remote IPC only to the immutable, packaged entry origins,

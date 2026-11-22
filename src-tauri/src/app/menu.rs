@@ -209,14 +209,10 @@ fn window_menu(app: &AppHandle<Wry>) -> tauri::Result<Submenu<Wry>> {
     window_menu.append(&PredefinedMenuItem::maximize(app, None)?)?;
 
     let accounts_menu = Submenu::new(app, "Accounts", true)?;
-    let mut has_accounts = false;
-    let mut has_active_account = false;
     if let Some(state) = app.try_state::<MultiWindowState>() {
         let accounts = state.accounts_snapshot();
         if !accounts.is_empty() {
-            has_accounts = true;
             let active = state.active_account();
-            has_active_account = active.is_some();
             for account in &accounts {
                 let id = format!("switch_account:{}", account.id);
                 let mut label = if account.label.trim().is_empty() {
@@ -239,24 +235,13 @@ fn window_menu(app: &AppHandle<Wry>) -> tauri::Result<Submenu<Wry>> {
         true,
         None::<&str>,
     )?)?;
-    if has_accounts && has_active_account {
-        accounts_menu.append(&MenuItem::with_id(
-            app,
-            "rename_current_account",
-            "Rename Current Account",
-            true,
-            None::<&str>,
-        )?)?;
-    }
-    if has_accounts {
-        accounts_menu.append(&MenuItem::with_id(
-            app,
-            "remove_current_account",
-            "Remove Current Account",
-            true,
-            None::<&str>,
-        )?)?;
-    }
+    accounts_menu.append(&MenuItem::with_id(
+        app,
+        "manage_accounts",
+        "Manage Accounts…",
+        true,
+        None::<&str>,
+    )?)?;
     accounts_menu.append(&MenuItem::with_id(
         app,
         "switch_account",
@@ -334,8 +319,7 @@ fn prompt_account_name(default: &str) -> Option<String> {
     let escaped = default
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
-        .replace('\n', " ")
-        .replace('\r', " ");
+        .replace(['\n', '\r'], " ");
     let script = format!(
         "text returned of (display dialog \"Account name:\" default answer \"{escaped}\" with title \"Pake\" buttons {{\"Cancel\",\"Save\"}} default button \"Save\")"
     );
@@ -557,75 +541,11 @@ pub fn handle_menu_click(app_handle: &AppHandle, id: &str) {
                 }
             }
         }
-        "rename_current_account" => {
-            if let Some(window) = focused_webview_window(app_handle) {
-                if let Some(state) = app_handle.try_state::<MultiWindowState>() {
-                    let active = state.active_account();
-                    let Some(active_id) = active else { return };
-                    let mut accounts = state.accounts.lock().unwrap_or_else(|e| e.into_inner());
-                    let Some(account) = accounts.iter_mut().find(|a| a.id == active_id) else {
-                        return;
-                    };
-                    let Some(new_label) = prompt_account_name(&account.label) else {
-                        return;
-                    };
-                    account.label = new_label.clone();
-                    let snapshot = accounts.clone();
-                    drop(accounts);
-                    if let Ok(path) = state.accounts_path.lock() {
-                        if let Some(path) = path.as_ref() {
-                            let _ = crate::util::write_accounts(path, &snapshot);
-                        }
-                    }
-                    let _ = set_app_menu(
-                        app_handle,
-                        state.pake_config.multi_window,
-                        state
-                            .pake_config
-                            .windows
-                            .first()
-                            .map(|w| w.enable_find)
-                            .unwrap_or(false),
-                    );
-                    crate::util::show_toast(&window, &format!("Renamed: {}", new_label));
-                }
-            }
-        }
-        "remove_current_account" => {
-            if let Some(window) = focused_webview_window(app_handle) {
-                if let Some(state) = app_handle.try_state::<MultiWindowState>() {
-                    let active = state.active_account();
-                    if let Some(active_id) = active {
-                        let mut accounts = state.accounts.lock().unwrap_or_else(|e| e.into_inner());
-                        accounts.retain(|a| a.id != active_id);
-                        let snapshot = accounts.clone();
-                        drop(accounts);
-                        if let Ok(mut active) = state.active_account_id.lock() {
-                            *active = None;
-                        }
-                        if let Ok(path) = state.accounts_path.lock() {
-                            if let Some(path) = path.as_ref() {
-                                let _ = crate::util::write_accounts(path, &snapshot);
-                            }
-                        }
-                        if let Ok(path) = state.active_account_path.lock() {
-                            if let Some(path) = path.as_ref() {
-                                let _ = std::fs::remove_file(path);
-                            }
-                        }
-                        let _ = set_app_menu(
-                            app_handle,
-                            state.pake_config.multi_window,
-                            state
-                                .pake_config
-                                .windows
-                                .first()
-                                .map(|w| w.enable_find)
-                                .unwrap_or(false),
-                        );
-                        crate::util::show_toast(&window, "Account removed");
-                    }
-                }
+        "manage_accounts" => {
+            // The manager window has its own editing UI; no focused webview
+            // needed, so this works even while the main window is hidden.
+            if let Err(error) = crate::app::account_manager::open_manager(app_handle) {
+                eprintln!("[Pake] Failed to open the account manager: {error}");
             }
         }
         _ => {
