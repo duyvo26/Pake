@@ -443,38 +443,36 @@ pub fn handle_menu_click(app_handle: &AppHandle, id: &str) {
             }
         }
         "change_download_folder" => {
-            // NSOpenPanel is main-thread only, so the picker runs there and the
-            // answer comes back to this handler thread.
+            // NSOpenPanel is main-thread only and modal. Never block the
+            // handler waiting for it: menubar events reach this closure from
+            // the main-thread run loop, so a blocking receive would deadlock
+            // against the very panel it just scheduled. Apply the answer on
+            // the picking thread instead.
             let app = app_handle.clone();
-            let (sender, receiver) = std::sync::mpsc::channel();
             let spawned = app_handle.run_on_main_thread(move || {
                 let current = crate::util::get_download_dir(&app).ok();
-                let picked = crate::app::download_folder::pick_folder(current.as_deref());
-                let _ = sender.send(picked);
+                let Some(directory) = crate::app::download_folder::pick_folder(current.as_deref())
+                else {
+                    return;
+                };
+                if let Some(state) = app.try_state::<MultiWindowState>() {
+                    if let Ok(mut slot) = state.download_dir_override.lock() {
+                        *slot = Some(directory.clone());
+                    }
+                }
+                if let Ok(data_dir) = app.path().app_data_dir() {
+                    let path = crate::util::download_dir_file_path(&data_dir);
+                    if let Err(error) = crate::util::write_download_dir(&path, &directory) {
+                        eprintln!("[Pake] Could not remember the download folder: {error}");
+                    }
+                }
+                if let Some(window) = focused_webview_window(&app) {
+                    let message = format!("Downloads: {}", directory.display());
+                    crate::util::show_toast(&window, &message);
+                }
             });
             if let Err(error) = spawned {
                 eprintln!("[Pake] Could not open the folder picker: {error}");
-                return;
-            }
-            // The block runs on the main thread; waiting here is what keeps the
-            // result ordered with the rest of the menu handling.
-            let Ok(picked) = receiver.recv() else { return };
-            let Some(directory) = picked else { return };
-
-            if let Some(state) = app_handle.try_state::<MultiWindowState>() {
-                if let Ok(mut slot) = state.download_dir_override.lock() {
-                    *slot = Some(directory.clone());
-                }
-            }
-            if let Ok(data_dir) = app_handle.path().app_data_dir() {
-                let path = crate::util::download_dir_file_path(&data_dir);
-                if let Err(error) = crate::util::write_download_dir(&path, &directory) {
-                    eprintln!("[Pake] Could not remember the download folder: {error}");
-                }
-            }
-            if let Some(window) = focused_webview_window(app_handle) {
-                let message = format!("Downloads: {}", directory.display());
-                crate::util::show_toast(&window, &message);
             }
         }
         "clear_cache_restart" => {
