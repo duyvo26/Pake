@@ -90,6 +90,12 @@ pub struct MultiWindowState {
     /// Folder the user picked at runtime, overriding the build-time
     /// `download_dir` until they change it again.
     pub download_dir_override: std::sync::Mutex<Option<PathBuf>>,
+    /// The data store the *running* home webview was built with. This is the
+    /// single source of truth for "which cookies is the app using", and it is
+    /// deliberately not derived from the active account: a session can exist
+    /// before it is saved as an account, and clearing must only ever touch the
+    /// store this webview owns.
+    pub session_store: std::sync::Mutex<Option<[u8; 16]>>,
 }
 
 impl MultiWindowState {
@@ -103,6 +109,20 @@ impl MultiWindowState {
             accounts_path: std::sync::Mutex::new(None),
             active_account_path: std::sync::Mutex::new(None),
             download_dir_override: std::sync::Mutex::new(None),
+            session_store: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// The store the live home webview uses. `None` means the default store,
+    /// which is shared by everything and must never be wiped on behalf of one
+    /// account.
+    pub fn session_store_id(&self) -> Option<[u8; 16]> {
+        self.session_store.lock().ok().and_then(|slot| *slot)
+    }
+
+    pub fn set_session_store(&self, store: Option<[u8; 16]>) {
+        if let Ok(mut slot) = self.session_store.lock() {
+            *slot = store;
         }
     }
 
@@ -283,6 +303,20 @@ pub fn data_store_id_for_account(account_id: &str) -> [u8; 16] {
     bytes
 }
 
+/// A brand-new, never-reused data store id for a fresh session.
+///
+/// Uses the clock plus a process-local counter: two "New Session" clicks must
+/// not land in the same jar, and a restart must not revisit an old one.
+pub fn data_store_id_for_session() -> [u8; 16] {
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_nanos())
+        .unwrap_or(0);
+    let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
+    data_store_id_for_account(&format!("session_{millis}_{sequence}"))
+}
+
 /// The data store of the account the app is currently showing, if any. Windows
 /// built for the active account (home window, Cmd+N clones, popups) inherit it
 /// so they all read the same cookies.
@@ -292,9 +326,7 @@ fn active_data_store(app: &AppHandle) -> Option<[u8; 16]> {
     if state.pake_config.windows.first()?.incognito {
         return None;
     }
-    state
-        .active_account()
-        .map(|account_id| data_store_id_for_account(&account_id))
+    state.session_store_id()
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -426,11 +458,15 @@ pub fn open_internal_page_window(
 ///
 /// WKWebView fixes its data store when the webview is created, so a running
 /// webview cannot adopt another account's cookies; only a new webview can. The
-/// old window keeps its frame, the replacement opens at the same position and
-/// size, and the caller has already marked the target account active so
-/// `active_data_store` hands `build_window` the right identifier.
+/// old window keeps its frame and the replacement opens at the same position and
+/// size. `data_store` is explicit: the caller decides which cookie jar the new
+/// session uses, and this records it as the live session store.
 #[cfg(target_os = "macos")]
-pub fn reopen_home_window_for_account(app: &AppHandle, url: Url) -> tauri::Result<()> {
+pub fn reopen_home_window_for_account(
+    app: &AppHandle,
+    url: Url,
+    data_store: Option<[u8; 16]>,
+) -> tauri::Result<()> {
     let state = app.state::<MultiWindowState>();
     let old = app.get_webview_window("pake");
 
@@ -462,8 +498,12 @@ pub fn reopen_home_window_for_account(app: &AppHandle, url: Url) -> tauri::Resul
         &state.tauri_config,
         "pake",
         WebviewUrl::External(url),
-        active_data_store(app),
+        data_store,
     )?;
+
+    // The rebuilt webview now owns this store; remember it before anything can
+    // ask which cookies are live.
+    state.set_session_store(data_store);
 
     if let Some((position, size)) = frame {
         let _ = window.set_position(position);

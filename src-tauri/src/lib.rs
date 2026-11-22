@@ -472,6 +472,17 @@ pub fn run_app() {
                         }
                     }
                     let active = crate::util::read_active_account(&active_path);
+
+                    // The live session store follows the restored active
+                    // account, so the first window opens into its cookies.
+                    // Without an active account the webview uses the default
+                    // store, which no account owns.
+                    #[cfg(target_os = "macos")]
+                    if let Some(account) = active.as_deref().and_then(|active_id| {
+                        accounts.iter().find(|account| account.id == active_id)
+                    }) {
+                        state.set_session_store(Some(account.data_store_id()));
+                    }
                     if let Ok(mut slot) = state.accounts.lock() {
                         *slot = accounts;
                     }

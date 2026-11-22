@@ -86,8 +86,12 @@ impl WindowConfig {
     }
 }
 
-/// A saved web account the user can switch back to from the menu. Stored per
-/// window config; `Switch Account` reloads the window with the next entry.
+/// A saved web account the user can switch back to from the menu.
+///
+/// `store_id` names the `WKWebsiteDataStore` this account's logins live in, as a
+/// UUID string. It belongs to the account, not to the account id: an account
+/// saved from a session that already had its own store keeps that store, so
+/// reopening the account returns to the exact same cookies.
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct AccountConfig {
     pub id: String,
@@ -95,6 +99,46 @@ pub struct AccountConfig {
     pub url: String,
     #[serde(default)]
     pub incognito: bool,
+    /// UUID of the account's data store. Empty on configs saved before stores
+    /// existed; those fall back to a store derived from `id`.
+    #[serde(default)]
+    pub store_id: String,
+}
+
+impl AccountConfig {
+    /// The UUID this account's webview must use. Malformed or missing values
+    /// fall back to the id-derived store so an account always opens somewhere
+    /// deterministic instead of sharing the default store.
+    pub fn data_store_id(&self) -> [u8; 16] {
+        parse_uuid(&self.store_id)
+            .unwrap_or_else(|| crate::app::window::data_store_id_for_account(&self.id))
+    }
+}
+
+/// Parse a canonical `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` UUID.
+pub fn parse_uuid(value: &str) -> Option<[u8; 16]> {
+    let hex: String = value.chars().filter(|c| *c != '-').collect();
+    if hex.len() != 32 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut bytes = [0u8; 16];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).ok()?;
+    }
+    Some(bytes)
+}
+
+/// Canonical lowercase UUID text for a 16-byte identifier.
+pub fn format_uuid(bytes: &[u8; 16]) -> String {
+    let hex: Vec<String> = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    format!(
+        "{}-{}-{}-{}-{}",
+        hex[0..4].concat(),
+        hex[4..6].concat(),
+        hex[6..8].concat(),
+        hex[8..10].concat(),
+        hex[10..16].concat()
+    )
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -219,6 +263,69 @@ pub struct RemoteCapability(Capability);
 impl RuntimeCapability for RemoteCapability {
     fn build(self) -> CapabilityFile {
         CapabilityFile::Capability(self.0)
+    }
+}
+
+#[cfg(test)]
+mod account_store_tests {
+    use super::{format_uuid, parse_uuid, AccountConfig};
+
+    fn account(id: &str, store_id: &str) -> AccountConfig {
+        AccountConfig {
+            id: id.into(),
+            label: id.into(),
+            url: "https://chat.zalo.me/".into(),
+            incognito: false,
+            store_id: store_id.into(),
+        }
+    }
+
+    #[test]
+    fn uuids_round_trip() {
+        let bytes = crate::app::window::data_store_id_for_account("acc_1");
+        let text = format_uuid(&bytes);
+        assert_eq!(text.len(), 36);
+        assert_eq!(text.chars().filter(|c| *c == '-').count(), 4);
+        assert_eq!(parse_uuid(&text), Some(bytes));
+    }
+
+    #[test]
+    fn malformed_uuids_are_rejected() {
+        for bad in [
+            "",
+            "not-a-uuid",
+            "d2f94cc9-48db-48eb-b0cf",
+            "d2f94cc9-48db-48eb-b0cf-1c479c6425f",
+            "zzf94cc9-48db-48eb-b0cf-1c479c6425fb",
+        ] {
+            assert_eq!(parse_uuid(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn an_account_uses_its_saved_store() {
+        let saved = crate::app::window::data_store_id_for_account("pinned");
+        let pinned = account("acc_1", &format_uuid(&saved));
+        assert_eq!(pinned.data_store_id(), saved);
+    }
+
+    #[test]
+    fn accounts_without_a_saved_store_stay_distinct() {
+        // Configs written before stores existed carry an empty store_id. Two
+        // such accounts must still resolve to different jars, or switching
+        // between them would show one account's cookies under the other.
+        let first = account("acc_1", "").data_store_id();
+        let second = account("acc_2", "").data_store_id();
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn a_corrupt_store_falls_back_to_the_id_store() {
+        let broken = account("acc_1", "garbage");
+        assert_eq!(
+            broken.data_store_id(),
+            crate::app::window::data_store_id_for_account("acc_1")
+        );
     }
 }
 

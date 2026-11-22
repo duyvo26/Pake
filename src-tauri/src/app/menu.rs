@@ -464,34 +464,49 @@ pub fn handle_menu_click(app_handle: &AppHandle, id: &str) {
             }
         }
         "switch_account" => {
-            // New session: clear browsing data and return to home URL.
+            // Start a new session in a brand-new data store.
+            //
+            // This used to call `clear_all_browsing_data`, which empties the
+            // jar the running webview owns: starting "account 2" wiped account
+            // 1's logins instead of giving account 2 its own. A fresh store
+            // leaves every saved account untouched.
+            let Some(state) = app_handle.try_state::<MultiWindowState>() else {
+                return;
+            };
+            let Some(url) = home_url(app_handle) else {
+                return;
+            };
             if let Some(window) = focused_webview_window(app_handle) {
-                crate::util::show_toast(&window, "Starting new session...");
-                let _ = window.clear_all_browsing_data();
-                if let Some(state) = app_handle.try_state::<MultiWindowState>() {
-                    if let Ok(mut active) = state.active_account_id.lock() {
-                        *active = None;
-                    }
-                    if let Ok(path) = state.active_account_path.lock() {
-                        if let Some(path) = path.as_ref() {
-                            let _ = std::fs::remove_file(path);
-                        }
-                    }
-                    let _ = set_app_menu(
-                        app_handle,
-                        state.pake_config.multi_window,
-                        state
-                            .pake_config
-                            .windows
-                            .first()
-                            .map(|w| w.enable_find)
-                            .unwrap_or(false),
-                    );
-                }
-                if let Some(url) = home_url(app_handle) {
-                    let _ = window.navigate(url);
+                crate::util::show_toast(&window, "Starting a new session...");
+            }
+            if let Ok(mut active) = state.active_account_id.lock() {
+                *active = None;
+            }
+            if let Ok(path) = state.active_account_path.lock() {
+                if let Some(path) = path.as_ref() {
+                    let _ = std::fs::remove_file(path);
                 }
             }
+            let fresh = crate::app::window::data_store_id_for_session();
+            #[cfg(target_os = "macos")]
+            if let Err(error) =
+                crate::app::window::reopen_home_window_for_account(app_handle, url, Some(fresh))
+            {
+                eprintln!("[Pake] Failed to start a new session: {error}");
+                return;
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = fresh;
+            let _ = set_app_menu(
+                app_handle,
+                state.pake_config.multi_window,
+                state
+                    .pake_config
+                    .windows
+                    .first()
+                    .map(|w| w.enable_find)
+                    .unwrap_or(false),
+            );
         }
         "save_current_account" => {
             if let Some(window) = focused_webview_window(app_handle) {
@@ -519,11 +534,25 @@ pub fn handle_menu_click(app_handle: &AppHandle, id: &str) {
                             .unwrap_or(0)
                     );
                     let toast_label = label.clone();
+                    // Bind the store the window is actually using. Saving used
+                    // to record only an id, so the account later reopened in a
+                    // store derived from that id while its cookies had gone to
+                    // whatever the live session used (a user's report,
+                    // 2026-11-22: two accounts sharing one jar).
+                    let store_id = state
+                        .session_store_id()
+                        .map(|bytes| crate::app::config::format_uuid(&bytes))
+                        .unwrap_or_else(|| {
+                            crate::app::config::format_uuid(
+                                &crate::app::window::data_store_id_for_account(&id),
+                            )
+                        });
                     let account = crate::app::config::AccountConfig {
                         id: id.clone(),
                         label,
                         url,
                         incognito: false,
+                        store_id,
                     };
                     let mut accounts = state.accounts.lock().unwrap_or_else(|e| e.into_inner());
                     accounts.push(account);

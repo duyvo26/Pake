@@ -191,11 +191,17 @@ pub fn add_account(
         return Err("Account name cannot be empty".into());
     }
     let url = validate_account_url(&url)?;
+    let id = new_account_id();
+    // A new account gets its own store so its first sign-in cannot land in a
+    // jar another account already uses.
+    let store_id =
+        crate::app::config::format_uuid(&crate::app::window::data_store_id_for_account(&id));
     let account = AccountConfig {
-        id: new_account_id(),
+        id,
         label,
         url,
         incognito: false,
+        store_id,
     };
     let state = app
         .try_state::<MultiWindowState>()
@@ -258,17 +264,16 @@ pub fn remove_account(app: AppHandle<Wry>, id: String) -> Result<(), String> {
     let state = app
         .try_state::<MultiWindowState>()
         .ok_or("Missing app state")?;
-    let snapshot = {
+    let (snapshot, removed_store) = {
         let mut accounts = state
             .accounts
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let before = accounts.len();
-        accounts.retain(|account| account.id != id);
-        if accounts.len() == before {
+        let Some(removed) = accounts.iter().find(|account| account.id == id).cloned() else {
             return Err("Account not found".into());
-        }
-        accounts.clone()
+        };
+        accounts.retain(|account| account.id != id);
+        (accounts.clone(), removed.data_store_id())
     };
     if state.active_account().as_deref() == Some(id.as_str()) {
         if let Ok(mut active) = state.active_account_id.lock() {
@@ -280,17 +285,20 @@ pub fn remove_account(app: AppHandle<Wry>, id: String) -> Result<(), String> {
             }
         }
     }
-    // Drop the account's isolated cookie jar too; leaving it behind would keep
-    // its logins on disk and leak storage for accounts the user deleted.
+    // Drop the account's cookie jar, but never the store the running webview is
+    // using: deleting that would sign the app out of the session it is showing.
     #[cfg(target_os = "macos")]
     {
-        let store = crate::app::window::data_store_id_for_account(&id);
-        let cleanup_app = app.clone();
-        tauri::async_runtime::spawn(async move {
-            if let Err(error) = cleanup_app.remove_data_store(store).await {
-                eprintln!("[Pake] Could not remove the account data store: {error}");
-            }
-        });
+        let store = removed_store;
+        let live = state.session_store_id();
+        if live != Some(store) {
+            let cleanup_app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = cleanup_app.remove_data_store(store).await {
+                    eprintln!("[Pake] Could not remove the account data store: {error}");
+                }
+            });
+        }
     }
     persist_accounts(&app, &snapshot)
 }
@@ -331,9 +339,9 @@ pub fn switch_account_to(
 
     // A cookie jar belongs to the webview that owns it. Navigating the existing
     // webview kept the previous login (a user's report, 2026-11-22), so rebuild
-    // the home webview with this account's own data store instead.
+    // the home webview with the store saved for this account.
     #[cfg(target_os = "macos")]
-    crate::app::window::reopen_home_window_for_account(&app, url)
+    crate::app::window::reopen_home_window_for_account(&app, url, Some(account.data_store_id()))
         .map_err(|error| format!("Failed to switch account: {error}"))?;
 
     #[cfg(not(target_os = "macos"))]
