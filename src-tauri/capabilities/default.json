@@ -22,6 +22,8 @@
     "allow-update-account",
     "allow-remove-account",
     "allow-switch-account-to",
+    "allow-settings-state",
+    "allow-choose-download-folder",
     "shell:allow-open",
     "core:window:allow-theme",
     "core:window:allow-start-dragging",

@@ -21,6 +21,8 @@ fn main() {
             "update_account",
             "remove_account",
             "switch_account_to",
+            "settings_state",
+            "choose_download_folder",
         ]),
     ))
     .expect("Failed to build Pake permissions")

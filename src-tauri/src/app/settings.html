@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Settings</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #f5f5f7;
+        --card: #ffffff;
+        --text: #1d1d1f;
+        --dim: #6e6e73;
+        --line: rgba(0, 0, 0, 0.09);
+        --accent: #3478f6;
+        --accent-weak: rgba(52, 120, 246, 0.12);
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #1e1f20;
+          --card: #2a2b2d;
+          --text: #f2f2f4;
+          --dim: #9d9da2;
+          --line: rgba(255, 255, 255, 0.12);
+          --accent: #5c9aff;
+          --accent-weak: rgba(92, 154, 255, 0.16);
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+      main {
+        max-width: 560px;
+        margin: 0 auto;
+        padding: 20px 18px 24px;
+      }
+      h1 {
+        font-size: 20px;
+        margin: 2px 0 16px;
+      }
+      h2 {
+        font-size: 11px;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        color: var(--dim);
+        margin: 22px 4px 8px;
+        font-weight: 600;
+      }
+      .card {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        overflow: hidden;
+      }
+      .row {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 12px 14px;
+        border-top: 1px solid var(--line);
+      }
+      .row:first-child {
+        border-top: none;
+      }
+      .label {
+        font-weight: 600;
+        margin-bottom: 2px;
+      }
+      .meta {
+        flex: 1;
+        min-width: 0;
+      }
+      .value {
+        color: var(--dim);
+        font-size: 11.5px;
+        word-break: break-all;
+        -webkit-user-select: text;
+        user-select: text;
+      }
+      .hint {
+        color: var(--dim);
+        font-size: 11.5px;
+        margin-top: 3px;
+      }
+      button {
+        font: inherit;
+        border: 1px solid var(--line);
+        background: var(--card);
+        color: var(--text);
+        border-radius: 7px;
+        padding: 5px 12px;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      button:hover {
+        background: var(--accent-weak);
+      }
+      button.primary {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #fff;
+        font-weight: 600;
+      }
+      button.primary:hover {
+        filter: brightness(1.08);
+      }
+      footer {
+        color: var(--dim);
+        font-size: 11px;
+        margin-top: 20px;
+        text-align: center;
+      }
+      .status {
+        color: var(--dim);
+        text-align: center;
+        padding: 18px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Settings</h1>
+
+      <h2>Downloads</h2>
+      <div class="card">
+        <div class="row">
+          <div class="meta">
+            <div class="label">Save downloads to</div>
+            <div class="value" id="downloadDir">Loading…</div>
+            <div class="hint" id="downloadHint"></div>
+          </div>
+          <button class="primary" id="chooseBtn">Choose…</button>
+        </div>
+      </div>
+
+      <h2>About</h2>
+      <div class="card">
+        <div class="row">
+          <div class="meta">
+            <div class="label" id="appName">App</div>
+            <div class="hint">Built with Pake. Point any webpage at a window, nothing more.</div>
+          </div>
+        </div>
+      </div>
+
+      <footer id="footer"></footer>
+    </main>
+
+    <script>
+      const invoke = window.__TAURI__?.core?.invoke;
+      const dirEl = document.getElementById("downloadDir");
+      const hintEl = document.getElementById("downloadHint");
+
+      async function call(command, args) {
+        if (!invoke) throw new Error("IPC bridge unavailable");
+        return invoke(command, args);
+      }
+
+      async function refresh() {
+        try {
+          const state = await call("settings_state");
+          dirEl.textContent = state.downloadDir;
+          hintEl.textContent = state.fromPicker
+            ? "Chosen in this app; overrides the folder baked into the build"
+            : "Default (Downloads folder, or the build's --download-dir)";
+          document.getElementById("appName").textContent = state.appName;
+          document.getElementById("footer").textContent = state.version
+            ? `Pake ${state.version}`
+            : "";
+        } catch (error) {
+          dirEl.textContent = String(error);
+        }
+      }
+
+      document.getElementById("chooseBtn").addEventListener("click", async () => {
+        const button = document.getElementById("chooseBtn");
+        button.disabled = true;
+        try {
+          // The picker opens a sheet on this window and resolves with the
+          // chosen path, or null when the user cancels.
+          await call("choose_download_folder");
+          await refresh();
+        } catch (error) {
+          hintEl.textContent = String(error);
+        } finally {
+          button.disabled = false;
+        }
+      });
+
+      refresh();
+    </script>
+  </body>
+</html>

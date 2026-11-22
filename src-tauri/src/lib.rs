@@ -31,7 +31,8 @@ const GDK_BACKEND: &str = "GDK_BACKEND";
 use app::window::enter_configured_fullscreen;
 use app::{
     account_manager::{
-        add_account, list_accounts, remove_account, switch_account_to, update_account,
+        add_account, choose_download_folder, list_accounts, remove_account, settings_state,
+        switch_account_to, update_account,
     },
     invoke::{
         clear_dock_badge, close_notification, download_file, increment_dock_badge, quit_app,
@@ -443,6 +444,8 @@ pub fn run_app() {
             update_account,
             remove_account,
             switch_account_to,
+            settings_state,
+            choose_download_folder,
         ])
         .setup(move |app| {
             // Grant remote IPC only to the immutable, packaged entry origins,

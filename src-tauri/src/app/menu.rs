@@ -48,6 +48,14 @@ fn app_menu(app: &AppHandle<Wry>) -> tauri::Result<Submenu<Wry>> {
         Some(about_metadata),
     )?)?;
     app_menu.append(&PredefinedMenuItem::separator(app)?)?;
+    app_menu.append(&MenuItem::with_id(
+        app,
+        "open_settings",
+        "Settings…",
+        true,
+        Some("CmdOrCtrl+,"),
+    )?)?;
+    app_menu.append(&PredefinedMenuItem::separator(app)?)?;
     app_menu.append(&PredefinedMenuItem::services(app, None)?)?;
     app_menu.append(&PredefinedMenuItem::separator(app)?)?;
     app_menu.append(&PredefinedMenuItem::hide(app, None)?)?;
@@ -71,14 +79,6 @@ fn file_menu(app: &AppHandle<Wry>, allow_multi_window: bool) -> tauri::Result<Su
         file_menu.append(&PredefinedMenuItem::separator(app)?)?;
     }
     file_menu.append(&PredefinedMenuItem::close_window(app, None)?)?;
-    file_menu.append(&PredefinedMenuItem::separator(app)?)?;
-    file_menu.append(&MenuItem::with_id(
-        app,
-        "change_download_folder",
-        "Change Download Folder…",
-        true,
-        None::<&str>,
-    )?)?;
     file_menu.append(&PredefinedMenuItem::separator(app)?)?;
     file_menu.append(&MenuItem::with_id(
         app,
@@ -442,37 +442,12 @@ pub fn handle_menu_click(app_handle: &AppHandle, id: &str) {
                 let _ = window.eval("window.pakeFind?.previous()");
             }
         }
-        "change_download_folder" => {
-            // NSOpenPanel is main-thread only and modal. Never block the
-            // handler waiting for it: menubar events reach this closure from
-            // the main-thread run loop, so a blocking receive would deadlock
-            // against the very panel it just scheduled. Apply the answer on
-            // the picking thread instead.
-            let app = app_handle.clone();
-            let spawned = app_handle.run_on_main_thread(move || {
-                let current = crate::util::get_download_dir(&app).ok();
-                let Some(directory) = crate::app::download_folder::pick_folder(current.as_deref())
-                else {
-                    return;
-                };
-                if let Some(state) = app.try_state::<MultiWindowState>() {
-                    if let Ok(mut slot) = state.download_dir_override.lock() {
-                        *slot = Some(directory.clone());
-                    }
-                }
-                if let Ok(data_dir) = app.path().app_data_dir() {
-                    let path = crate::util::download_dir_file_path(&data_dir);
-                    if let Err(error) = crate::util::write_download_dir(&path, &directory) {
-                        eprintln!("[Pake] Could not remember the download folder: {error}");
-                    }
-                }
-                if let Some(window) = focused_webview_window(&app) {
-                    let message = format!("Downloads: {}", directory.display());
-                    crate::util::show_toast(&window, &message);
-                }
-            });
-            if let Err(error) = spawned {
-                eprintln!("[Pake] Could not open the folder picker: {error}");
+        "open_settings" => {
+            // Settings owns its own window and its own picker (see
+            // `settings.html` and `choose_download_folder`), so the menu only
+            // has to open it.
+            if let Err(error) = crate::app::account_manager::open_settings(app_handle) {
+                eprintln!("[Pake] Failed to open Settings: {error}");
             }
         }
         "clear_cache_restart" => {

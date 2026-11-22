@@ -14,6 +14,7 @@ use tauri::http::{Request, Response};
 use tauri::{AppHandle, Manager, Url, WebviewWindow, Wry};
 
 pub const MANAGER_WINDOW_LABEL: &str = "pake-accounts";
+pub const SETTINGS_WINDOW_LABEL: &str = "pake-settings";
 pub const MANAGER_PROTOCOL: &str = "pakeaccounts";
 /// Fallback reveal delay, mirroring the multi-window clones in `window.rs`;
 /// normally the global `on_page_load` reveal fires first for `pake-*` labels.
@@ -21,9 +22,16 @@ const REVEAL_FALLBACK_MS: u64 = 1_000;
 
 static NEXT_ACCOUNT_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Serve the embedded manager page for every path on the manager scheme.
-pub fn serve(_request: Request<Vec<u8>>) -> Response<Vec<u8>> {
-    let body = include_bytes!("account_manager.html").to_vec();
+/// Serve the embedded local pages for the `pakeaccounts://` scheme. The path
+/// picks which page: `/settings.html` for Settings, anything else for the
+/// account list. One scheme keeps the capability grant to a single host.
+pub fn serve(request: Request<Vec<u8>>) -> Response<Vec<u8>> {
+    let path = request.uri().path();
+    let body: Vec<u8> = if path.contains("settings") {
+        include_bytes!("settings.html").to_vec()
+    } else {
+        include_bytes!("account_manager.html").to_vec()
+    };
     match Response::builder()
         .header("Content-Type", "text/html; charset=utf-8")
         .body(body)
@@ -37,6 +45,36 @@ pub fn serve(_request: Request<Vec<u8>>) -> Response<Vec<u8>> {
             response
         }
     }
+}
+
+/// Open (or focus) the Settings window.
+#[cfg(target_os = "macos")]
+pub fn open_settings(app: &AppHandle<Wry>) -> tauri::Result<WebviewWindow> {
+    if let Some(existing) = app.get_webview_window(SETTINGS_WINDOW_LABEL) {
+        let _ = existing.unminimize();
+        let _ = existing.show();
+        let _ = existing.set_focus();
+        return Ok(existing);
+    }
+
+    let url =
+        Url::parse(&format!("{MANAGER_PROTOCOL}://localhost/settings.html")).map_err(|error| {
+            tauri::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Invalid settings URL: {error}"),
+            ))
+        })?;
+    let window = crate::app::window::open_internal_page_window(app, SETTINGS_WINDOW_LABEL, url)?;
+    let _ = window.set_title("Settings");
+    let _ = window.set_resizable(false);
+
+    let fallback = window.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(tokio::time::Duration::from_millis(REVEAL_FALLBACK_MS)).await;
+        crate::app::window::reveal_built_window(&fallback);
+    });
+    let _ = window.set_focus();
+    Ok(window)
 }
 
 /// Open (or focus) the manager window. Built hidden through the shared
@@ -310,6 +348,66 @@ pub fn switch_account_to(
         let _ = window.close();
     }
     Ok(())
+}
+
+/// What the Settings page shows on open.
+#[derive(serde::Serialize)]
+pub struct SettingsState {
+    #[serde(rename = "downloadDir")]
+    pub download_dir: String,
+    #[serde(rename = "fromPicker")]
+    pub from_picker: bool,
+    #[serde(rename = "appName")]
+    pub app_name: String,
+    pub version: String,
+}
+
+#[tauri::command]
+pub fn settings_state(app: AppHandle<Wry>) -> Result<SettingsState, String> {
+    let state = app
+        .try_state::<MultiWindowState>()
+        .ok_or("Missing app state")?;
+    let from_picker = state
+        .download_dir_override
+        .lock()
+        .map(|slot| slot.is_some())
+        .unwrap_or(false);
+    let download_dir = crate::util::get_download_dir(&app)?;
+    let package = app.package_info();
+    Ok(SettingsState {
+        download_dir: download_dir.display().to_string(),
+        from_picker,
+        app_name: package.name.clone(),
+        version: package.version.to_string(),
+    })
+}
+
+/// Ask for a new download folder and remember it. Returns the chosen path, or
+/// `None` when the user cancels.
+///
+/// The picker is main-thread only, and Tauri may run this command on either
+/// thread, so `pick_folder_blocking` detects where it is and dispatches only
+/// when it has to.
+#[tauri::command]
+pub fn choose_download_folder(app: AppHandle<Wry>) -> Result<Option<String>, String> {
+    let state = app
+        .try_state::<MultiWindowState>()
+        .ok_or("Missing app state")?;
+    let current = crate::util::get_download_dir(&app).ok();
+    let Some(directory) = crate::app::download_folder::pick_folder_blocking(&app, current) else {
+        return Ok(None);
+    };
+
+    if let Ok(mut slot) = state.download_dir_override.lock() {
+        *slot = Some(directory.clone());
+    }
+    if let Ok(data_dir) = app.path().app_data_dir() {
+        let path = crate::util::download_dir_file_path(&data_dir);
+        if let Err(error) = crate::util::write_download_dir(&path, &directory) {
+            eprintln!("[Pake] Could not remember the download folder: {error}");
+        }
+    }
+    Ok(Some(directory.display().to_string()))
 }
 
 #[cfg(test)]

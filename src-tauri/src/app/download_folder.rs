@@ -43,6 +43,38 @@ pub fn pick_folder(_start: Option<&std::path::Path>) -> Option<std::path::PathBu
     None
 }
 
+/// Show the picker from any thread.
+///
+/// `NSOpenPanel` only works on the main thread, and a call that is *already*
+/// there must not hop (that would deadlock waiting on itself). So detect the
+/// current thread and only dispatch when needed.
+pub fn pick_folder_blocking(
+    app: &tauri::AppHandle<tauri::Wry>,
+    start: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        if objc2::MainThreadMarker::new().is_some() {
+            return pick_folder(start.as_deref());
+        }
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let spawned = app.run_on_main_thread(move || {
+            let _ = sender.send(pick_folder(start.as_deref()));
+        });
+        if spawned.is_err() {
+            return None;
+        }
+        // Safe to block: the panel runs on the main thread, which is free here
+        // because this branch only runs when the caller is off it.
+        receiver.recv().ok().flatten()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, start);
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::util::{read_download_dir, write_download_dir};
