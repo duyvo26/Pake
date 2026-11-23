@@ -9,6 +9,13 @@
 //!
 //! Holding an `NSProcessInfo` activity for the process lifetime tells the system
 //! this work must keep running in the background.
+//!
+//! The options matter as much as the activity. This first used
+//! `UserInitiated | LatencyCritical`, which also disables idle sleep and turns
+//! off timer coalescing for the whole process: every subsystem stopped batching
+//! its wake-ups, and the machine felt sluggish (a user's report, 2026-11-23).
+//! `UserInitiatedAllowingIdleSystemSleep` alone is what this needs — it fights
+//! App Nap without keeping the Mac awake or de-coalescing timers.
 
 /// Start a user-initiated activity that survives the window being hidden.
 ///
@@ -19,9 +26,9 @@
 pub fn keep_awake_while_hidden() {
     use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
 
-    // Everything the user started must keep running, and the site's socket
-    // handling is latency-sensitive enough that throttling it loses messages.
-    let options = NSActivityOptions::UserInitiated | NSActivityOptions::LatencyCritical;
+    // Enough to keep App Nap from suspending the page's socket callbacks, and
+    // no more: the Mac may still sleep, and timers keep coalescing.
+    let options = NSActivityOptions::UserInitiatedAllowingIdleSystemSleep;
     let reason = NSString::from_str("Pake keeps the packaged web app running while hidden");
     let info = NSProcessInfo::processInfo();
     let activity = info.beginActivityWithOptions_reason(options, &reason);
@@ -33,15 +40,41 @@ pub fn keep_awake_while_hidden() {}
 
 #[cfg(test)]
 mod tests {
-    /// The activity must include user-initiated work: anything less still lets
-    /// App Nap throttle the hidden webview's socket callbacks.
+    /// The activity must count as user-initiated work, or App Nap still
+    /// throttles the hidden webview's socket callbacks.
+    ///
+    /// `UserInitiatedAllowingIdleSystemSleep` is `UserInitiated` minus the idle
+    /// sleep bit, so `contains(UserInitiated)` is false by construction; compare
+    /// what actually matters, everything user-initiated except that bit.
     #[cfg(target_os = "macos")]
     #[test]
-    fn the_activity_is_user_initiated_and_not_throttled() {
+    fn the_activity_is_user_initiated() {
         use objc2_foundation::NSActivityOptions;
-        let options = NSActivityOptions::UserInitiated | NSActivityOptions::LatencyCritical;
-        assert!(options.contains(NSActivityOptions::UserInitiated));
-        assert!(options.contains(NSActivityOptions::LatencyCritical));
-        assert!(options.contains(NSActivityOptions::IdleSystemSleepDisabled));
+        let options = NSActivityOptions::UserInitiatedAllowingIdleSystemSleep;
+        let user_initiated_without_sleep = NSActivityOptions(
+            NSActivityOptions::UserInitiated.0 & !NSActivityOptions::IdleSystemSleepDisabled.0,
+        );
+        assert_eq!(options, user_initiated_without_sleep);
+    }
+
+    /// The activity must NOT disable idle sleep: keeping the Mac awake for a
+    /// background chat window is not what the user asked for, and the first
+    /// version did exactly that.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_activity_lets_the_mac_sleep() {
+        use objc2_foundation::NSActivityOptions;
+        let options = NSActivityOptions::UserInitiatedAllowingIdleSystemSleep;
+        assert!(!options.contains(NSActivityOptions::IdleSystemSleepDisabled));
+    }
+
+    /// Latency-critical turns off timer coalescing for the whole process, which
+    /// made the machine feel slow; it must not come back.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_activity_does_not_disable_timer_coalescing() {
+        use objc2_foundation::NSActivityOptions;
+        let options = NSActivityOptions::UserInitiatedAllowingIdleSystemSleep;
+        assert!(!options.contains(NSActivityOptions::LatencyCritical));
     }
 }

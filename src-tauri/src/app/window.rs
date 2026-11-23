@@ -454,6 +454,29 @@ pub fn open_internal_page_window(
     )
 }
 
+/// The home window, rebuilt if it no longer exists.
+///
+/// A destroyed webview leaves no "pake" window behind, and the Dock's reopen
+/// event then had nothing to show, so clicking the icon did nothing (a user's
+/// report, 2026-11-23: "sometimes it does not open"). Rebuilding keeps the
+/// reveal path working whether the window was hidden or gone.
+pub fn ensure_home_window(app: &AppHandle) -> Option<WebviewWindow> {
+    if let Some(existing) = app.get_webview_window("pake") {
+        return Some(existing);
+    }
+    let state = app.try_state::<MultiWindowState>()?;
+    match build_window_with_label(app, &state.pake_config, &state.tauri_config, "pake") {
+        Ok(window) => {
+            reapply_window_icon(&window);
+            Some(window)
+        }
+        Err(error) => {
+            eprintln!("[Pake] Failed to rebuild the home window: {error}");
+            None
+        }
+    }
+}
+
 /// Replace the home webview so the new account gets its own cookie jar.
 ///
 /// WKWebView fixes its data store when the webview is created, so a running
@@ -513,10 +536,21 @@ pub fn reopen_home_window_for_account(
         let _ = window.set_fullscreen(true);
     }
 
-    let _ = window.show();
+    // The window is built hidden and stays hidden until its first real page
+    // load (`lib.rs` on_page_load reveals label "pake"). Showing it here showed
+    // a bare white frame while the new webview was still painting, which is the
+    // report this rebuild started from. The loading overlay covers that gap for
+    // anything that does show early.
     reapply_window_icon(&window);
-    enter_configured_fullscreen(&window);
     let _ = window.set_focus();
+
+    // A switch that never delivers a page load must not leave the app with no
+    // visible window at all.
+    let fallback = window.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(tokio::time::Duration::from_millis(3_000)).await;
+        reveal_built_window(&fallback);
+    });
     Ok(())
 }
 
@@ -964,7 +998,11 @@ fn build_window(
     // Add initialization scripts. Order matters: pakeConfig must land before
     // any script that reads it, and toast must register `window.pakeToast`
     // before Rust code calls show_toast().
+    // First script after the config: the loading overlay must be on screen
+    // before the page paints, so a rebuild or a slow load never shows a bare
+    // white frame (a user's report, 2026-11-23).
     window_builder = window_builder
+        .initialization_script_for_all_frames(include_str!("../inject/loading.js"))
         .initialization_script_for_all_frames(&config_script)
         .initialization_script_for_all_frames(include_str!("../inject/link_policy.js"))
         .initialization_script_for_all_frames(include_str!("../inject/auth.js"))

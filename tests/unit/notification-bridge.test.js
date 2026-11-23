@@ -293,11 +293,17 @@ describe("notification bridge", () => {
 
   it("validates native click callback ids even if they come from old stored notifications", () => {
     const source = fs.readFileSync("src-tauri/src/app/notification.rs", "utf8");
+    // The delegate method follows whichever framework implements it
+    // (UserNotifications names it `did_receive`); what must not change is that
+    // the id taken from the delivered notification is validated before it
+    // reaches `dispatch_click`, and that the split is on the last '|'.
     const callback = source.slice(
-      source.indexOf("fn did_activate("),
-      source.indexOf("fn should_present("),
+      source.indexOf("fn did_receive("),
+      source.indexOf("impl Delegate {"),
     );
-    expect(callback).toContain("validate_id(id)");
+    expect(callback).toContain("validate_id(id).is_err()");
+    expect(callback).toContain("rsplit_once('|')");
+    expect(callback).toContain("dispatch_click(");
   });
 
   it("routes an addEventListener click handler with the notification as target", async () => {

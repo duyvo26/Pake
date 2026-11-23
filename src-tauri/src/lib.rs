@@ -627,8 +627,11 @@ pub fn run_app() {
             } = _event
             {
                 if !has_visible_windows {
-                    if let Some(window) = _app.get_webview_window("pake") {
-                        cancel_startup_reveal(&reopen_revealed);
+                    cancel_startup_reveal(&reopen_revealed);
+                    // `ensure_home_window` also rebuilds it when an account
+                    // switch destroyed the webview, which used to make the Dock
+                    // icon do nothing at all.
+                    if let Some(window) = app::window::ensure_home_window(_app) {
                         let _ = window.show();
                         reapply_window_icon(&window);
                         #[cfg(target_os = "macos")]
