@@ -998,11 +998,12 @@ fn build_window(
     // Add initialization scripts. Order matters: pakeConfig must land before
     // any script that reads it, and toast must register `window.pakeToast`
     // before Rust code calls show_toast().
-    // First script after the config: the loading overlay must be on screen
-    // before the page paints, so a rebuild or a slow load never shows a bare
-    // white frame (a user's report, 2026-11-23).
+    // The loading overlay covers the whole window, so it belongs to the main
+    // frame only: injected into every iframe it covered embedded content and
+    // made selection there impossible, so copying text out of an iframe worked
+    // only sometimes (a user's report, 2026-11-23).
     window_builder = window_builder
-        .initialization_script_for_all_frames(include_str!("../inject/loading.js"))
+        .initialization_script(include_str!("../inject/loading.js"))
         .initialization_script_for_all_frames(&config_script)
         .initialization_script_for_all_frames(include_str!("../inject/link_policy.js"))
         .initialization_script_for_all_frames(include_str!("../inject/auth.js"))

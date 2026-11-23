@@ -96,6 +96,11 @@
   var root = build();
 
   function mount() {
+    // Never resurrect a dismissed overlay: a single-page app rewrites <html>'s
+    // children on route and theme changes, and re-attaching the full-screen
+    // cover afterwards cleared the page's text selection, which made Cmd+C copy
+    // nothing (a user's report, 2026-11-23: "copy works sometimes").
+    if (settled) return;
     if (!root) root = build();
     if (root && !root.parentNode && document.documentElement) {
       document.documentElement.appendChild(root);
@@ -105,12 +110,12 @@
   // At document start the element exists but the body does not; keep the
   // overlay attached as the document is parsed. Re-attach it if a framework
   // replaces <html>'s children wholesale, which would orphan the overlay.
+  var mountObserver = null;
   if (!root.parentNode) {
     document.addEventListener("readystatechange", mount);
     if (document.documentElement) {
-      new MutationObserver(mount).observe(document.documentElement, {
-        childList: true,
-      });
+      mountObserver = new MutationObserver(mount);
+      mountObserver.observe(document.documentElement, { childList: true });
     }
   }
 
@@ -118,6 +123,10 @@
     if (settled) return;
     settled = true;
     clearTimeout(slowTimer);
+    if (mountObserver) {
+      mountObserver.disconnect();
+      mountObserver = null;
+    }
     var el = document.getElementById(OVERLAY_ID) || root;
     if (!el) return;
     var wait = Math.max(0, MIN_VISIBLE_MS - (Date.now() - startedAt));
