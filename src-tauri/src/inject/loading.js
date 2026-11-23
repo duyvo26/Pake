@@ -103,14 +103,14 @@
   }
 
   // At document start the element exists but the body does not; keep the
-  // overlay attached as the document is parsed.
+  // overlay attached as the document is parsed. Re-attach it if a framework
+  // replaces <html>'s children wholesale, which would orphan the overlay.
   if (!root.parentNode) {
     document.addEventListener("readystatechange", mount);
     if (document.documentElement) {
-      new MutationObserver(function () {
-        mount();
-        if (document.body) remove();
-      }).observe(document.documentElement, { childList: true });
+      new MutationObserver(mount).observe(document.documentElement, {
+        childList: true,
+      });
     }
   }
 
@@ -129,18 +129,40 @@
     }, wait);
   }
 
-  // Hide when the document settles. `load` waits for images; a chat app keeps
-  // sockets open forever, so DOM readiness is the signal worth using first.
+  // A chat app is a single-page app: DOMContentLoaded and even `load` arrive
+  // long before React paints anything, so removing the overlay then left a
+  // white window for several seconds (a user's report, 2026-11-23: still white
+  // for ~5s). Wait for the document to actually contain visible content.
+  function hasVisibleContent() {
+    var body = document.body;
+    if (!body) return false;
+    // Text anywhere is the cheapest honest signal that the app rendered.
+    if (body.innerText && body.innerText.trim().length > 0) return true;
+    // Canvas/video-only pages have no text but do have something to show.
+    return !!body.querySelector("canvas, video, img, svg");
+  }
+
   function onReady() {
     if (document.readyState === "loading") return;
-    remove();
+    if (hasVisibleContent()) remove();
   }
+
+  var contentPoll = setInterval(function () {
+    if (hasVisibleContent()) {
+      clearInterval(contentPoll);
+      remove();
+    }
+  }, 100);
+
+  // Nothing to show after a long wait means the page is stuck (offline,
+  // blocked); drop the overlay so the user is not trapped behind it.
+  setTimeout(function () {
+    clearInterval(contentPoll);
+    remove();
+  }, 20000);
 
   document.addEventListener("DOMContentLoaded", onReady);
   document.addEventListener("readystatechange", onReady);
-  window.addEventListener("load", remove);
-  window.addEventListener("pageshow", remove);
-  // If the document never becomes ready (offline, stalled), the overlay stays
-  // with the "Still loading…" hint rather than leaving a white frame.
-  if (document.readyState !== "loading") remove();
+  window.addEventListener("load", onReady);
+  if (document.readyState !== "loading") onReady();
 })();

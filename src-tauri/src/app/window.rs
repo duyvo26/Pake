@@ -1095,6 +1095,17 @@ fn build_window(
         None // Follow system theme
     };
 
+    // Paint the window the same shade the loading overlay uses before any page
+    // content exists. WKWebView draws its default white background before the
+    // first paint and before any script runs, which is the white flash a user
+    // kept seeing for ~5s on a slow start (report, 2026-11-23). The overlay in
+    // `inject/loading.js` then takes over with the matching colour.
+    window_builder = window_builder.background_color(if window_config.dark_mode {
+        tauri::window::Color(30, 31, 32, 255)
+    } else {
+        tauri::window::Color(255, 255, 255, 255)
+    });
+
     // Platform-specific configuration must be set before proxy on Windows/Linux
     #[cfg(target_os = "macos")]
     {
