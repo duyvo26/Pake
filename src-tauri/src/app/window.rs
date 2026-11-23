@@ -596,7 +596,24 @@ pub fn reveal_built_window(window: &WebviewWindow) {
     #[cfg(target_os = "macos")]
     enter_configured_fullscreen(window);
     let _ = window.set_focus();
+    focus_webview_after_show(window);
 }
+
+/// Give the webview keyboard focus after the window is shown.
+///
+/// Copy, cut and paste go through AppKit's responder chain, so a webview that
+/// is not first responder copies nothing and clears the pasteboard instead.
+#[cfg(target_os = "macos")]
+pub fn focus_webview_after_show(window: &WebviewWindow) {
+    if let Err(error) = window.with_webview(|webview| {
+        crate::app::navigation::focus_webview(&webview);
+    }) {
+        eprintln!("[Pake] Failed to focus the webview for keyboard input: {error}");
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn focus_webview_after_show(_window: &WebviewWindow) {}
 
 /// Puts a window into full screen the first time it is shown when the app is set to
 /// start in full screen. Once per window, so a window the user took out of full
@@ -1004,6 +1021,9 @@ fn build_window(
     // only sometimes (a user's report, 2026-11-23).
     window_builder = window_builder
         .initialization_script(include_str!("../inject/loading.js"))
+        // Every frame: a selection can live in an iframe, and the top
+        // document's getSelection() is empty there.
+        .initialization_script_for_all_frames(include_str!("../inject/copy_bridge.js"))
         .initialization_script_for_all_frames(&config_script)
         .initialization_script_for_all_frames(include_str!("../inject/link_policy.js"))
         .initialization_script_for_all_frames(include_str!("../inject/auth.js"))

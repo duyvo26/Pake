@@ -34,6 +34,7 @@ use app::{
         add_account, choose_download_folder, list_accounts, remove_account, settings_state,
         switch_account_to, update_account,
     },
+    clipboard::copy_selection,
     invoke::{
         clear_dock_badge, close_notification, download_file, increment_dock_badge, quit_app,
         reveal_download, send_notification, set_dock_badge, set_dock_badge_label,
@@ -93,6 +94,11 @@ fn reveal_startup_window(window: WebviewWindow, init_fullscreen: bool, revealed:
 
         #[cfg(target_os = "macos")]
         enter_configured_fullscreen(&window);
+
+        // The window is shown before its webview has a responder; without this
+        // the first Cmd+C after launch copies nothing while the selection is
+        // still on screen.
+        app::window::focus_webview_after_show(&window);
 
         #[cfg(not(target_os = "linux"))]
         let _ = init_fullscreen;
@@ -446,6 +452,7 @@ pub fn run_app() {
             switch_account_to,
             settings_state,
             choose_download_folder,
+            copy_selection,
         ])
         .setup(move |app| {
             // Grant remote IPC only to the immutable, packaged entry origins,
@@ -574,6 +581,17 @@ pub fn run_app() {
             Ok(())
         })
         .on_window_event(move |_window, _event| {
+            // Whenever a window takes focus, hand keyboard focus to its webview.
+            // AppKit's responder chain is what routes Cmd+C, Edit > Copy and the
+            // context menu's Copy; when a native panel or another app held first
+            // responder, copy cleared the pasteboard and wrote nothing, so it
+            // "worked only sometimes" (a user's report, 2026-11-23).
+            #[cfg(target_os = "macos")]
+            if matches!(_event, tauri::WindowEvent::Focused(true)) {
+                if let Some(webview) = _window.app_handle().get_webview_window(_window.label()) {
+                    app::window::focus_webview_after_show(&webview);
+                }
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = _event {
                 if remember_url && _window.label() == "pake" {
                     save_last_url(_window.app_handle());

@@ -24,6 +24,7 @@
     "allow-switch-account-to",
     "allow-settings-state",
     "allow-choose-download-folder",
+    "allow-copy-selection",
     "shell:allow-open",
     "core:window:allow-theme",
     "core:window:allow-start-dragging",

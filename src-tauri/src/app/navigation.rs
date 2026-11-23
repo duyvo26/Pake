@@ -31,6 +31,39 @@ pub fn history_step(window: &WebviewWindow, back: bool) {
     }
 }
 
+/// Make the webview the window's first responder.
+///
+/// AppKit routes Cmd+C, the Edit menu's Copy, and a context menu's Copy through
+/// the responder chain. After a window is shown, rebuilt, or a native panel
+/// closes, something else can hold first responder, and copy then runs against
+/// nothing: WebKit clears the pasteboard and writes no data, so "copy" silently
+/// does nothing (a user's report, 2026-11-23, reproduced: Edit > Copy emptied
+/// the pasteboard, and the same keystroke worked once the page had focus).
+#[cfg(target_os = "macos")]
+pub fn focus_webview(webview: &tauri::webview::PlatformWebview) {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyObject, Bool};
+
+    let view = webview.inner() as *mut AnyObject;
+    if view.is_null() {
+        return;
+    }
+    // The webview knows its own window; taking it from the view avoids holding
+    // a second borrow across the with_webview callback.
+    let ns_window: *mut AnyObject = unsafe { msg_send![view, window] };
+    if ns_window.is_null() {
+        return;
+    }
+    // SAFETY: both pointers come from the live webview, and the call only
+    // re-orders AppKit's responder chain.
+    unsafe {
+        let accepted: Bool = msg_send![ns_window, makeFirstResponder: view];
+        if !accepted.as_bool() {
+            eprintln!("[Pake] The webview refused first-responder status");
+        }
+    }
+}
+
 /// Apply the password-save prompt setting, including explicit opt-out.
 ///
 /// This deliberately configures the app's own WebView2 profile; it does not
